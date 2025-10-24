@@ -82,30 +82,36 @@ public class ApiService {
     }
 
     // === Generate Cisco Access Token ===
-    private String getAccessToken() {
-        if (accessToken != null && tokenExpiry != null && LocalDateTime.now().isBefore(tokenExpiry)) {
-            return accessToken;
-        }
-
-        try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-            String body = "grant_type=client_credentials&client_id=" + CLIENT_ID + "&client_secret=" + CLIENT_SECRET;
-
-            HttpEntity<String> entity = new HttpEntity<>(body, headers);
-            ResponseEntity<String> response = restTemplate.postForEntity(TOKEN_URL, entity, String.class);
-
-            JsonNode tokenResponse = mapper.readTree(response.getBody());
-            accessToken = tokenResponse.path("access_token").asText();
-            int expiresIn = tokenResponse.path("expires_in").asInt(3600);
-            tokenExpiry = LocalDateTime.now().plusSeconds(expiresIn - 60);
-
-            System.out.println(" New Cisco token generated. Expires in " + expiresIn + " seconds.");
-            return accessToken;
-        } catch (Exception e) {
-            throw new RuntimeException(" Failed to obtain Cisco OAuth2 token: " + e.getMessage(), e);
-        }
+private String getAccessToken() {
+    if (accessToken != null && tokenExpiry != null && LocalDateTime.now().isBefore(tokenExpiry)) {
+        return accessToken;
     }
+
+    try {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+
+        MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
+        body.add("grant_type", "client_credentials");
+        body.add("client_id", CLIENT_ID);
+        body.add("client_secret", CLIENT_SECRET);
+
+        HttpEntity<MultiValueMap<String, String>> entity = new HttpEntity<>(body, headers);
+
+        ResponseEntity<String> response = restTemplate.postForEntity(TOKEN_URL, entity, String.class);
+
+        JsonNode tokenResponse = mapper.readTree(response.getBody());
+        accessToken = tokenResponse.path("access_token").asText();
+        int expiresIn = tokenResponse.path("expires_in").asInt(3600);
+        tokenExpiry = LocalDateTime.now().plusSeconds(expiresIn - 60);
+
+        System.out.println("New Cisco token generated. Expires in " + expiresIn + " seconds.");
+        return accessToken;
+    } catch (Exception e) {
+        throw new RuntimeException("Failed to obtain Cisco OAuth2 token: " + e.getMessage(), e);
+    }
+}
+
 
     // === Fetch and Store Cisco Advisories ===
     @Scheduled(cron = "0 0 */6 * * *") // every 6 hours
@@ -257,5 +263,6 @@ public class ApiService {
         }
     }
 }
+
 
 
