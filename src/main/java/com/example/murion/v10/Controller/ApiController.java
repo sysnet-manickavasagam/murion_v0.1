@@ -3,6 +3,12 @@ package com.example.murion.v10.Controller;
 import com.example.murion.v10.Service.ApiService;
 import org.springframework.web.bind.annotation.*;
 import java.util.Map;
+import com.example.murion.v10.Entity.VendorFetchLog;
+import com.example.murion.v10.Repository.VendorFetchLogRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
+import java.util.List;
+
 
 @RestController
 @RequestMapping("/api")
@@ -55,3 +61,4 @@ public class ApiController {
     }
 
 }
+
