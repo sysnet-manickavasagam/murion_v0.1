@@ -27,14 +27,14 @@ public class ApiController {
 
 
     // Endpoint for NVD data only
-    @GetMapping("/nvd/cisco")
-    public Map<String, Object> getNVDData() {
-        return apiService.fetchNVDData();
-    }
-
+//   @GetMapping("/nvd/cisco")
+  //  public Map<String, Object> getNVDData() {
+  //      return apiService.fetchNVDData();
+//    }
+//
     // Original endpoint for backward compatibility (points to NVD)
-    @GetMapping("/fetch")
-    public Map<String, Object> getData() {
-        return apiService.fetchNVDData();
-    }
+//    @GetMapping("/fetch")
+//    public Map<String, Object> getData() {
+//        return apiService.fetchNVDData();
+ //   }
 }
