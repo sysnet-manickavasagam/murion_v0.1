@@ -13,22 +13,25 @@ import org.springframework.http.*;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.RestTemplate;
+
 import javax.net.ssl.*;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLSocketFactory;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
-import javax.net.ssl.HttpsURLConnection;
 
-
+/**
+ * ApiService - unified service that:
+ *  - fetches & stores Cisco advisories (with OAuth token)
+ *  - fetches NVD summary and updates vendor logs
+ *  - updates VendorFetchLog for both vendors
+ *
+ * Note: keep your CLIENT_ID/CLIENT_SECRET secure (use config/env in production).
+ */
 @Service
 public class ApiService {
 
@@ -41,7 +44,7 @@ public class ApiService {
     @Autowired
     private VendorFetchLogRepository logRepository;
 
-    // --- Cisco OAuth2 Credentials ---
+    // --- Cisco OAuth2 Credentials (move to config/env in production) ---
     private static final String CLIENT_ID = "q37wu5ga3695r3jfzccnfp8q";
     private static final String CLIENT_SECRET = "aB54S9PgZuTD87TpumQPw2Yq";
     private static final String TOKEN_URL = "https://id.cisco.com/oauth2/default/v1/token";
@@ -53,7 +56,7 @@ public class ApiService {
         this.restTemplate = createUnsafeRestTemplate();
     }
 
-    // --- Disable SSL Verification for Cisco API ---
+    // --- Disable SSL Verification for Cisco API (for testing only) ---
     private RestTemplate createUnsafeRestTemplate() {
         try {
             TrustManager[] trustAllCerts = new TrustManager[]{
@@ -82,120 +85,143 @@ public class ApiService {
         }
     }
 
-    // === Generate Cisco Access Token ===
-private String getAccessToken() {
-    if (accessToken != null && tokenExpiry != null && LocalDateTime.now().isBefore(tokenExpiry)) {
-        return accessToken;
+    // --- Cisco: obtain OAuth2 token (cached until expiry) ---
+    private String getAccessToken() {
+        if (accessToken != null && tokenExpiry != null && LocalDateTime.now().isBefore(tokenExpiry)) {
+            return accessToken;
+        }
+
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+
+            // Cisco expects client credentials in body OR Basic auth depending on registration.
+            // Here we put in body (works per docs examples) — if your app requires Basic Auth, switch to Basic header.
+            MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
+            body.add("grant_type", "client_credentials");
+            body.add("client_id", CLIENT_ID);
+            body.add("client_secret", CLIENT_SECRET);
+
+            HttpEntity<MultiValueMap<String, String>> entity = new HttpEntity<>(body, headers);
+
+            ResponseEntity<String> response = restTemplate.postForEntity(TOKEN_URL, entity, String.class);
+
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                throw new RuntimeException("Token request failed: HTTP " + response.getStatusCode());
+            }
+
+            JsonNode tokenResponse = mapper.readTree(response.getBody());
+            accessToken = tokenResponse.path("access_token").asText(null);
+            int expiresIn = tokenResponse.path("expires_in").asInt(3600);
+            tokenExpiry = LocalDateTime.now().plusSeconds(Math.max(expiresIn - 60, 30));
+
+            if (accessToken == null || accessToken.isEmpty()) {
+                throw new RuntimeException("Token response missing access_token: " + response.getBody());
+            }
+
+            System.out.println("🔑 New Cisco access token obtained (expires in " + expiresIn + "s)");
+            return accessToken;
+        } catch (Exception e) {
+            // include response body in earlier troubleshooting logs if needed
+            throw new RuntimeException("Failed to obtain Cisco OAuth2 token: " + e.getMessage(), e);
+        }
     }
 
-    try {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-
-        MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
-        body.add("grant_type", "client_credentials");
-        body.add("client_id", CLIENT_ID);
-        body.add("client_secret", CLIENT_SECRET);
-
-        HttpEntity<MultiValueMap<String, String>> entity = new HttpEntity<>(body, headers);
-
-        ResponseEntity<String> response = restTemplate.postForEntity(TOKEN_URL, entity, String.class);
-
-        JsonNode tokenResponse = mapper.readTree(response.getBody());
-        accessToken = tokenResponse.path("access_token").asText();
-        int expiresIn = tokenResponse.path("expires_in").asInt(3600);
-        tokenExpiry = LocalDateTime.now().plusSeconds(expiresIn - 60);
-
-        System.out.println("New Cisco token generated. Expires in " + expiresIn + " seconds.");
-        return accessToken;
-    } catch (Exception e) {
-        throw new RuntimeException("Failed to obtain Cisco OAuth2 token: " + e.getMessage(), e);
-    }
-}
-
-
-    // === Fetch and Store Cisco Advisories ===
-    @Scheduled(cron = "0 0 */6 * * *") // every 6 hours
+    // === Cisco: Fetch & store advisories (scheduled every 6 hours) ===
+    @Scheduled(cron = "0 0 */6 * * *")
     public void fetchAndStoreCiscoAdvisories() {
         String vendor = "Cisco";
         LocalDateTime startTime = LocalDateTime.now();
 
         VendorFetchLog log = logRepository.findByVendorName(vendor).orElseGet(() -> {
-            VendorFetchLog newLog = new VendorFetchLog();
-            newLog.setVendorName(vendor);
-            return newLog;
+            VendorFetchLog n = new VendorFetchLog();
+            n.setVendorName(vendor);
+            return n;
         });
 
         log.setPreviousFetchTime(log.getLastFetchTime());
         log.setLastFetchTime(startTime);
 
-        int totalBefore = (int) advisoryRepository.count();
         int added = 0;
+        long totalBefore = advisoryRepository.count();
 
-        String token = getAccessToken();
         String baseUrl = "https://apix.cisco.com/security/advisories/v2/all";
         int pageIndex = 1, pageSize = 100;
-        List<JsonNode> advisories = new ArrayList<>();
 
-        System.out.println(" Fetching Cisco advisories...");
+        System.out.println("🚀 Fetching Cisco advisories...");
 
         while (true) {
             try {
                 String url = baseUrl + "?pageIndex=" + pageIndex + "&pageSize=" + pageSize;
                 HttpHeaders headers = new HttpHeaders();
-                headers.set("Authorization", "Bearer " + token);
+                headers.set("Authorization", "Bearer " + getAccessToken());
                 headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
-                HttpEntity<String> entity = new HttpEntity<>(headers);
 
+                HttpEntity<String> entity = new HttpEntity<>(headers);
                 ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, entity, String.class);
+
+                if (!response.getStatusCode().is2xxSuccessful()) {
+                    System.err.println("Failed to fetch Cisco page " + pageIndex + ": HTTP " + response.getStatusCode());
+                    break;
+                }
+
                 JsonNode root = mapper.readTree(response.getBody());
                 JsonNode advList = root.path("advisories");
-
                 if (!advList.isArray() || advList.isEmpty()) break;
 
-                advList.forEach(advisories::add);
+                for (JsonNode adv : advList) {
+                    String advisoryId = adv.path("advisoryId").asText(null);
+                    if (advisoryId == null) continue;
+
+                    List<String> cveIds = extractList(adv.path("cves"));
+                    if (cveIds.isEmpty()) continue;
+
+                    Map<String, Object> ciscoData = buildCiscoData(adv);
+                    List<String> bugIds = extractList(adv.path("bugIDs"));
+                    List<String> cwes = extractList(adv.path("cwe"));
+                    List<String> products = extractList(adv.path("productNames"));
+
+                    String csafUrl = "https://sec.cloudapps.cisco.com/security/center/contentjson/CiscoSecurityAdvisory/"
+                            + advisoryId + "/csaf/" + advisoryId + ".json";
+
+                    JsonNode csafData = fetchCsafData(csafUrl);
+                    if (csafData == null || csafData.isEmpty()) continue;
+
+                    for (String cveId : cveIds) {
+                        try {
+                            JsonNode vulns = csafData.path("vulnerabilities");
+                            ArrayNode filtered = mapper.createArrayNode();
+                            if (vulns.isArray()) {
+                                for (JsonNode v : vulns) {
+                                    String cveField = v.has("cve") ? v.get("cve").asText() : v.path("cveid").asText();
+                                    if (cveField.equalsIgnoreCase(cveId)) filtered.add(v);
+                                }
+                            }
+                            ((ObjectNode) csafData).set("vulnerabilities", filtered);
+
+                            CiscoAdvisory entity = advisoryRepository.findById(cveId).orElse(new CiscoAdvisory());
+                            entity.setCveId(cveId);
+                            entity.setCisco_data(mapper.valueToTree(ciscoData));
+                            entity.setBug_id(mapper.valueToTree(bugIds));
+                            entity.setCwe(mapper.valueToTree(cwes));
+                            entity.setProductnames(mapper.valueToTree(products));
+                            entity.setCsaf(csafData);
+
+                            boolean existsBefore = advisoryRepository.existsById(cveId);
+                            advisoryRepository.save(entity);
+                            if (!existsBefore) added++;
+                        } catch (Exception ex) {
+                            System.err.println("Error saving CVE " + ex.getMessage());
+                        }
+                    }
+                }
+
                 if (advList.size() < pageSize) break;
                 pageIndex++;
 
             } catch (Exception e) {
-                System.err.println(" Error fetching page " + pageIndex + ": " + e.getMessage());
+                System.err.println("Error fetching Cisco page " + pageIndex + ": " + e.getMessage());
                 break;
-            }
-        }
-
-        for (JsonNode adv : advisories) {
-            try {
-                String advisoryId = adv.path("advisoryId").asText(null);
-                if (advisoryId == null) continue;
-
-                List<String> cveIds = extractList(adv.path("cves"));
-                if (cveIds.isEmpty()) continue;
-
-                Map<String, Object> ciscoData = buildCiscoData(adv);
-                List<String> bugIds = extractList(adv.path("bugIDs"));
-                List<String> cwes = extractList(adv.path("cwe"));
-                List<String> products = extractList(adv.path("productNames"));
-
-                String csafUrl = "https://sec.cloudapps.cisco.com/security/center/contentjson/CiscoSecurityAdvisory/"
-                        + advisoryId + "/csaf/" + advisoryId + ".json";
-
-                JsonNode csafData = fetchCsafData(csafUrl);
-                if (csafData == null || csafData.isEmpty()) continue;
-
-                for (String cveId : cveIds) {
-                    if (!advisoryRepository.existsById(cveId)) added++;
-
-                    CiscoAdvisory entity = advisoryRepository.findById(cveId).orElse(new CiscoAdvisory());
-                    entity.setCveId(cveId);
-                    entity.setCisco_data(mapper.valueToTree(ciscoData));
-                    entity.setBug_id(mapper.valueToTree(bugIds));
-                    entity.setCwe(mapper.valueToTree(cwes));
-                    entity.setProductnames(mapper.valueToTree(products));
-                    entity.setCsaf(csafData);
-                    advisoryRepository.save(entity);
-                }
-            } catch (Exception e) {
-                System.err.println(" Error saving advisory: " + e.getMessage());
             }
         }
 
@@ -203,8 +229,70 @@ private String getAccessToken() {
         log.setAddedData(added);
         logRepository.save(log);
 
-        System.out.println("Cisco advisories updated. Added: " + added);
+        System.out.println("✅ Cisco advisories updated. Added: " + added + " (before: " + totalBefore + ", after: " + advisoryRepository.count() + ")");
     }
+
+    // === NVD: Fetch summary & update VendorFetchLog ===
+    // Runs every 12 hours (offset 30 min) — adjust cron as needed.
+    @Scheduled(cron = "0 30 */12 * * *")
+    public void scheduledFetchNvdAndLog() {
+        fetchAndLogNvd();
+    }
+
+    /**
+     * Public method to fetch NVD summary and update VendorFetchLog.
+     * Returns a Map with the summary (status, totalResults, added).
+     */
+    public Map<String, Object> fetchAndLogNvd() {
+        String vendor = "NVD";
+        LocalDateTime startTime = LocalDateTime.now();
+
+        VendorFetchLog log = logRepository.findByVendorName(vendor).orElseGet(() -> {
+            VendorFetchLog n = new VendorFetchLog();
+            n.setVendorName(vendor);
+            return n;
+        });
+
+        log.setPreviousFetchTime(log.getLastFetchTime());
+        log.setLastFetchTime(startTime);
+
+        String url = "https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Cisco&resultsPerPage=2000";
+        try {
+            System.out.println("📡 Fetching NVD summary...");
+            ResponseEntity<String> response = restTemplate.getForEntity(url, String.class);
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                String msg = "NVD fetch failed: HTTP " + response.getStatusCode();
+                System.err.println(msg);
+                return Map.of("status", "error", "message", msg);
+            }
+
+            JsonNode root = mapper.readTree(response.getBody());
+            int totalResults = root.path("totalResults").asInt(0);
+
+            // compute addedData relative to previous log totalData
+            int previousTotal = log.getTotalData() != null ? log.getTotalData().intValue() : 0;
+            int added = Math.max(0, totalResults - previousTotal);
+
+            log.setTotalData(totalResults);
+            log.setAddedData(added);
+            logRepository.save(log);
+
+            System.out.println("✅ NVD summary: totalResults=" + totalResults + ", added=" + added);
+            Map<String, Object> summary = new HashMap<>();
+            summary.put("status", "success");
+            summary.put("totalResults", totalResults);
+            summary.put("added", added);
+            summary.put("timestamp", new Date().toString());
+            return summary;
+
+        } catch (Exception e) {
+            System.err.println("❌ ERROR fetching NVD: " + e.getMessage());
+            e.printStackTrace();
+            return Map.of("status", "error", "message", e.getMessage());
+        }
+    }
+
+    // --- helpers ---
 
     private Map<String, Object> buildCiscoData(JsonNode adv) {
         Map<String, Object> data = new LinkedHashMap<>();
@@ -230,41 +318,20 @@ private String getAccessToken() {
         return list;
     }
 
-    private JsonNode fetchCsafData(String url) {
+    private JsonNode fetchCsafData(String csafUrl) {
         try {
             HttpHeaders headers = new HttpHeaders();
             headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
             HttpEntity<String> entity = new HttpEntity<>(headers);
-            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, entity, String.class);
+            ResponseEntity<String> response = restTemplate.exchange(csafUrl, HttpMethod.GET, entity, String.class);
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                System.err.println("CSAF fetch failed (" + csafUrl + "): HTTP " + response.getStatusCode());
+                return mapper.createObjectNode();
+            }
             return mapper.readTree(response.getBody());
         } catch (Exception e) {
-            System.err.println(" CSAF fetch failed for " + url + ": " + e.getMessage());
+            System.err.println("⚠️ CSAF fetch failed for " + csafUrl + ": " + e.getMessage());
             return mapper.createObjectNode();
         }
     }
-
-
-    // --- NVD Fetch ---
-    public Map<String, Object> fetchNVDData() {
-        String url = "https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Cisco&resultsPerPage=2000";
-        try {
-            System.out.println("📡 Fetching NVD data for Cisco...");
-            ResponseEntity<String> response = restTemplate.getForEntity(url, String.class);
-            JsonNode root = mapper.readTree(response.getBody());
-
-            Map<String, Object> summary = new HashMap<>();
-            summary.put("status", response.getStatusCode().toString());
-            summary.put("totalResults", root.path("totalResults").asInt());
-            summary.put("timestamp", new Date().toString());
-            return summary;
-        } catch (Exception e) {
-            System.err.println("❌ ERROR: Unable to fetch NVD data");
-            e.printStackTrace();
-            return Map.of("error", e.getMessage());
-        }
-    }
-}
-
-
-
-
+                }
