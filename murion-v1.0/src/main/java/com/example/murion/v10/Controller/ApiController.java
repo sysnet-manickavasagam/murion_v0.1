@@ -2,6 +2,7 @@ package com.example.murion.v10.Controller;
 
 import com.example.murion.v10.Service.ApiService;
 import org.springframework.web.bind.annotation.*;
+
 import java.util.Map;
 
 @RestController
@@ -14,27 +15,30 @@ public class ApiController {
         this.apiService = apiService;
     }
 
-    // Endpoint for Cisco security advisories only
+    // ✅ Endpoint to fetch and store Cisco advisories
     @GetMapping("/fetch-cisco")
     public String fetchCiscoAdvisories() {
         try {
             apiService.fetchAndStoreCiscoAdvisories();
-            return "Cisco advisories fetched and stored successfully.";
+            return "✅ Cisco advisories fetched and stored successfully.";
         } catch (Exception e) {
-            return "Failed: " + e.getMessage();
+            return "❌ Failed to fetch Cisco advisories: " + e.getMessage();
         }
     }
 
+    // ✅ Endpoint to fetch NVD (National Vulnerability Database) data for Cisco
+    @GetMapping("/fetch-nvd")
+    public Map<String, Object> fetchNvdData() {
+        try {
+            return apiService.fetchNVDData();
+        } catch (Exception e) {
+            return Map.of("status", "error", "message", e.getMessage());
+        }
+    }
 
-    // Endpoint for NVD data only
-//   @GetMapping("/nvd/cisco")
-  //  public Map<String, Object> getNVDData() {
-  //      return apiService.fetchNVDData();
-//    }
-//
-    // Original endpoint for backward compatibility (points to NVD)
-//    @GetMapping("/fetch")
-//    public Map<String, Object> getData() {
-//        return apiService.fetchNVDData();
- //   }
+    // ✅ Optional unified endpoint for backward compatibility
+    @GetMapping("/fetch")
+    public Map<String, Object> fetchAllData() {
+        return apiService.fetchNVDData(); // currently calls NVD
+    }
 }
