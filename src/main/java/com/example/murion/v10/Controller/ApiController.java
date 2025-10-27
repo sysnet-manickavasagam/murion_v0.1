@@ -56,4 +56,11 @@ public class ApiController {
     public Map<String, Object> getData() {
         return apiService.fetchNVDData();
     }
+
+    // Add this to your ApiController
+@GetMapping("/test/cisco-auth")
+public Map<String, Object> testCiscoAuth() {
+    return apiService.testCredentials();
 }
+}
+
