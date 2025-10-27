@@ -17,11 +17,8 @@ import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
 
-import javax.net.ssl.*;
 import java.time.LocalDateTime;
 import java.util.*;
-import java.security.SecureRandom;
-import java.security.cert.X509Certificate;
 
 @Service
 public class ApiService {
@@ -35,7 +32,7 @@ public class ApiService {
     @Autowired
     private VendorFetchLogRepository logRepository;
 
-    // Cisco OAuth2 Credentials - Consider moving to application.properties
+    // Cisco OAuth2 Credentials
     private static final String CLIENT_ID = "q37wu5ga3695r3jfzccnfp8q";
     private static final String CLIENT_SECRET = "aB54S9PgZuTD87TpumQPw2Yq";
     private static final String TOKEN_URL = "https://id.cisco.com/oauth2/default/v1/token";
@@ -44,264 +41,23 @@ public class ApiService {
     private LocalDateTime tokenExpiry;
 
     public ApiService() {
-        this.restTemplate = createUnsafeRestTemplate();
+        // Use standard RestTemplate without SSL bypass
+        this.restTemplate = createRestTemplate();
     }
 
-    private RestTemplate createUnsafeRestTemplate() {
-        try {
-            TrustManager[] trustAllCerts = new TrustManager[]{
-                    new X509TrustManager() {
-                        public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
-                        public void checkClientTrusted(X509Certificate[] certs, String authType) {}
-                        public void checkServerTrusted(X509Certificate[] certs, String authType) {}
-                    }
-            };
-            SSLContext sslContext = SSLContext.getInstance("TLS");
-            sslContext.init(null, trustAllCerts, new SecureRandom());
-            SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
-
-            SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory() {
-                @Override
-                protected void prepareConnection(java.net.HttpURLConnection connection, String httpMethod) {
-                    if (connection instanceof HttpsURLConnection https) {
-                        https.setSSLSocketFactory(sslSocketFactory);
-                        https.setHostnameVerifier((hostname, session) -> true);
-                    }
-                }
-            };
-            
-            // Set timeouts
-            factory.setConnectTimeout(30000);
-            factory.setReadTimeout(30000);
-            
-            return new RestTemplate(factory);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to create RestTemplate with disabled SSL", e);
-        }
+    private RestTemplate createRestTemplate() {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        // Set timeouts
+        factory.setConnectTimeout(30000);
+        factory.setReadTimeout(30000);
+        return new RestTemplate(factory);
     }
 
-    // === Diagnostic Methods ===
+    // === Cisco OAuth2 Token Methods ===
 
     /**
-     * Comprehensive diagnosis of Cisco OAuth2 authentication
+     * Get OAuth2 access token from Cisco
      */
-    public Map<String, Object> diagnoseCiscoAuth() {
-        Map<String, Object> diagnosis = new LinkedHashMap<>();
-        List<String> logs = new ArrayList<>();
-        
-        logs.add("🔍 Starting Cisco OAuth Diagnosis...");
-        logs.add("Token URL: " + TOKEN_URL);
-        logs.add("Client ID: " + CLIENT_ID);
-        logs.add("Client Secret: " + (CLIENT_SECRET != null ? CLIENT_SECRET.substring(0, 4) + "***" : "null"));
-        
-        try {
-            // Test 1: Basic connectivity
-            logs.add("📡 Testing basic connectivity to id.cisco.com...");
-            try {
-                ResponseEntity<String> connectivityTest = restTemplate.getForEntity("https://id.cisco.com", String.class);
-                logs.add("✅ Basic connectivity: HTTP " + connectivityTest.getStatusCode());
-                diagnosis.put("connectivity", "SUCCESS - HTTP " + connectivityTest.getStatusCode());
-            } catch (Exception e) {
-                logs.add("❌ Basic connectivity failed: " + e.getMessage());
-                diagnosis.put("connectivity", "FAILED - " + e.getMessage());
-            }
-
-            // Test 2: Form URL encoded request (standard approach)
-            logs.add("🔄 Testing OAuth2 token request with form parameters...");
-            try {
-                HttpHeaders headers = new HttpHeaders();
-                headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-                headers.set("User-Agent", "Mozilla/5.0 (compatible; SecurityApp/1.0)");
-                
-                MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
-                body.add("grant_type", "client_credentials");
-                body.add("client_id", CLIENT_ID);
-                body.add("client_secret", CLIENT_SECRET);
-
-                HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(body, headers);
-                
-                logs.add("Request details:");
-                logs.add("  - Method: POST");
-                logs.add("  - Content-Type: " + headers.getContentType());
-                logs.add("  - Body parameters: grant_type, client_id, client_secret");
-
-                ResponseEntity<String> response = restTemplate.postForEntity(TOKEN_URL, request, String.class);
-                
-                if (response.getStatusCode().is2xxSuccessful()) {
-                    JsonNode responseBody = mapper.readTree(response.getBody());
-                    String token = responseBody.path("access_token").asText();
-                    int expiresIn = responseBody.path("expires_in").asInt();
-                    
-                    logs.add("✅ OAuth2 SUCCESS - Token obtained, length: " + (token != null ? token.length() : 0));
-                    logs.add("✅ Token expires in: " + expiresIn + " seconds");
-                    
-                    diagnosis.put("oauth2_form_params", "SUCCESS");
-                    diagnosis.put("token_length", token != null ? token.length() : 0);
-                    diagnosis.put("expires_in", expiresIn);
-                } else {
-                    logs.add("❌ OAuth2 FAILED - HTTP " + response.getStatusCode());
-                    logs.add("❌ Response: " + response.getBody());
-                    
-                    diagnosis.put("oauth2_form_params", "FAILED - HTTP " + response.getStatusCode());
-                    diagnosis.put("response_body", response.getBody());
-                }
-            } catch (Exception e) {
-                logs.add("❌ OAuth2 request failed: " + e.getMessage());
-                diagnosis.put("oauth2_form_params", "FAILED - " + e.getMessage());
-            }
-
-            // Test 3: Try with different RestTemplate (without SSL bypass)
-            logs.add("🔄 Testing with standard RestTemplate (no SSL bypass)...");
-            try {
-                RestTemplate normalTemplate = new RestTemplate();
-                normalTemplate.setRequestFactory(new SimpleClientHttpRequestFactory());
-                
-                HttpHeaders headers = new HttpHeaders();
-                headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-                
-                MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
-                body.add("grant_type", "client_credentials");
-                body.add("client_id", CLIENT_ID);
-                body.add("client_secret", CLIENT_SECRET);
-
-                HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(body, headers);
-                
-                ResponseEntity<String> response = normalTemplate.postForEntity(TOKEN_URL, request, String.class);
-                
-                if (response.getStatusCode().is2xxSuccessful()) {
-                    logs.add("✅ Standard RestTemplate SUCCESS - HTTP " + response.getStatusCode());
-                    diagnosis.put("standard_resttemplate", "SUCCESS");
-                } else {
-                    logs.add("❌ Standard RestTemplate FAILED - HTTP " + response.getStatusCode());
-                    diagnosis.put("standard_resttemplate", "FAILED - HTTP " + response.getStatusCode());
-                }
-            } catch (Exception e) {
-                logs.add("❌ Standard RestTemplate failed: " + e.getMessage());
-                diagnosis.put("standard_resttemplate", "FAILED - " + e.getMessage());
-            }
-
-        } catch (Exception e) {
-            logs.add("💥 Diagnosis failed with exception: " + e.getMessage());
-            diagnosis.put("diagnosis_error", e.getMessage());
-        }
-
-        diagnosis.put("logs", logs);
-        diagnosis.put("timestamp", LocalDateTime.now().toString());
-        
-        return diagnosis;
-    }
-
-    /**
-     * Get registration instructions for Cisco API
-     */
-    public Map<String, Object> getRegistrationInstructions() {
-        return Map.of(
-            "registration_steps", Arrays.asList(
-                "1. Go to: https://apiconsole.cisco.com/",
-                "2. Login with your Cisco account (create one if needed)",
-                "3. Click on 'My Apps & Keys' in the top navigation",
-                "4. Click 'Register a New App' button",
-                "5. Fill in the application details:",
-                "   - Application Name: YourAppName-Service",
-                "   - Application Type: SELECT 'Service'",
-                "   - Grant Type: SELECT 'Client Credentials'", 
-                "   - API Subscriptions: SELECT 'Cisco PSIRT openVuln API'",
-                "   - Description: (Optional) Your application description",
-                "   - Agree to terms of service",
-                "6. Click 'Register'",
-                "7. Copy the new Client ID and Client Secret",
-                "8. Update your application configuration with new credentials"
-            ),
-            "important_notes", Arrays.asList(
-                "⚠️  Current registered applications might be deprecated - you may need to migrate",
-                "⚠️  Application Type MUST be 'Service' (not 'Web' or other types)",
-                "⚠️  Grant Type MUST be 'Client Credentials'",
-                "⚠️  Make sure you subscribe to 'Cisco PSIRT openVuln API'",
-                "⚠️  Keep your Client Secret secure and never commit to version control"
-            ),
-            "troubleshooting_resources", Arrays.asList(
-                "Cisco PSIRT API Documentation: https://developer.cisco.com/docs/psirt/",
-                "API Migration Guide: https://developer.cisco.com/docs/psirt/#!migrating-applications",
-                "Getting Started: https://developer.cisco.com/docs/psirt/#!getting-started"
-            )
-        );
-    }
-
-    /**
-     * Test Cisco credentials specifically
-     */
-    public Map<String, Object> testCiscoCredentials() {
-        try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-            headers.set("User-Agent", "SecurityApp-Diagnostic/1.0");
-            
-            MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
-            body.add("grant_type", "client_credentials");
-            body.add("client_id", CLIENT_ID);
-            body.add("client_secret", CLIENT_SECRET);
-
-            HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(body, headers);
-
-            System.out.println("🔑 Testing Cisco credentials...");
-            System.out.println("URL: " + TOKEN_URL);
-            System.out.println("Client ID: " + CLIENT_ID);
-
-            ResponseEntity<String> response = restTemplate.postForEntity(TOKEN_URL, request, String.class);
-
-            if (response.getStatusCode().is2xxSuccessful()) {
-                JsonNode tokenResponse = mapper.readTree(response.getBody());
-                String token = tokenResponse.path("access_token").asText();
-                int expiresIn = tokenResponse.path("expires_in").asInt();
-                String tokenType = tokenResponse.path("token_type").asText();
-                String scope = tokenResponse.path("scope").asText();
-                
-                System.out.println("✅ SUCCESS: Token obtained successfully");
-                
-                return Map.of(
-                    "status", "success",
-                    "message", "Credentials are valid and working",
-                    "token_type", tokenType,
-                    "expires_in_seconds", expiresIn,
-                    "scope", scope,
-                    "token_length", token != null ? token.length() : 0,
-                    "next_steps", "You can now use the token to access Cisco PSIRT API"
-                );
-            } else {
-                System.err.println("❌ FAILED: HTTP " + response.getStatusCode());
-                
-                return Map.of(
-                    "status", "error",
-                    "http_status", response.getStatusCode().toString(),
-                    "response_body", response.getBody(),
-                    "message", "Authentication failed. Check your application registration.",
-                    "possible_causes", Arrays.asList(
-                        "Application not properly registered in Cisco API Console",
-                        "Application type is not 'Service'",
-                        "Grant type is not 'Client Credentials'", 
-                        "Not subscribed to Cisco PSIRT openVuln API",
-                        "Credentials are deprecated and need migration"
-                    )
-                );
-            }
-        } catch (Exception e) {
-            System.err.println("❌ EXCEPTION: " + e.getMessage());
-            
-            return Map.of(
-                "status", "error",
-                "message", e.getMessage(),
-                "possible_solutions", Arrays.asList(
-                    "Verify your application registration at https://apiconsole.cisco.com/",
-                    "Check if your application needs migration",
-                    "Ensure you're using the correct Client ID and Secret",
-                    "Try registering a new application with type 'Service'"
-                )
-            );
-        }
-    }
-
-    // === Cisco API Methods ===
-
     private String getAccessToken() {
         if (accessToken != null && tokenExpiry != null && LocalDateTime.now().isBefore(tokenExpiry)) {
             return accessToken;
@@ -345,7 +101,59 @@ public class ApiService {
     }
 
     /**
-     * Fetch and store Cisco advisories - with improved error handling
+     * Test Cisco credentials with detailed error handling
+     */
+    public Map<String, Object> testCiscoCredentials() {
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+            
+            MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
+            body.add("grant_type", "client_credentials");
+            body.add("client_id", CLIENT_ID);
+            body.add("client_secret", CLIENT_SECRET);
+
+            HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(body, headers);
+
+            System.out.println("🔑 Testing Cisco credentials with standard RestTemplate...");
+            
+            ResponseEntity<String> response = restTemplate.postForEntity(TOKEN_URL, request, String.class);
+
+            if (response.getStatusCode().is2xxSuccessful()) {
+                JsonNode tokenResponse = mapper.readTree(response.getBody());
+                String token = tokenResponse.path("access_token").asText();
+                int expiresIn = tokenResponse.path("expires_in").asInt();
+                
+                return Map.of(
+                    "status", "success",
+                    "message", "Cisco OAuth2 authentication successful!",
+                    "token_type", tokenResponse.path("token_type").asText(),
+                    "expires_in_seconds", expiresIn,
+                    "token_length", token != null ? token.length() : 0,
+                    "scope", tokenResponse.path("scope").asText("")
+                );
+            } else {
+                return Map.of(
+                    "status", "error",
+                    "http_status", response.getStatusCode().toString(),
+                    "response_body", response.getBody(),
+                    "message", "Authentication failed - Application may not be properly registered",
+                    "solution", "Please register a new application at https://apiconsole.cisco.com/ with type 'Service' and grant type 'Client Credentials'"
+                );
+            }
+        } catch (Exception e) {
+            return Map.of(
+                "status", "error",
+                "message", e.getMessage(),
+                "solution", "Your current credentials are not working. Please register a new application in Cisco API Console."
+            );
+        }
+    }
+
+    // === Cisco Advisory Methods ===
+
+    /**
+     * Fetch and store Cisco advisories
      */
     @Scheduled(cron = "0 0 */6 * * *")
     public void fetchAndStoreCiscoAdvisories() {
@@ -367,17 +175,17 @@ public class ApiService {
         System.out.println("🚀 Starting Cisco advisories fetch...");
 
         try {
-            // Test authentication first
+            // Get access token first
             String token = getAccessToken();
-            System.out.println("✅ Authentication successful, proceeding with data fetch...");
+            System.out.println("✅ Authentication successful, starting data fetch...");
             
-            // Your existing Cisco fetch logic here
+            // Fetch advisories from Cisco API
             String baseUrl = "https://apix.cisco.com/security/advisories/v2/all";
-            int pageIndex = 1, pageSize = 10; // Reduced for testing
-            
+            int pageIndex = 1, pageSize = 10; // Start with small page size for testing
+
             boolean hasMorePages = true;
             
-            while (hasMorePages) {
+            while (hasMorePages && pageIndex <= 5) { // Limit to 5 pages for initial testing
                 try {
                     String url = baseUrl + "?pageIndex=" + pageIndex + "&pageSize=" + pageSize;
                     HttpHeaders headers = new HttpHeaders();
@@ -388,8 +196,7 @@ public class ApiService {
                     ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, requestEntity, String.class);
 
                     if (!response.getStatusCode().is2xxSuccessful()) {
-                        System.err.println("Failed to fetch Cisco page " + pageIndex + ": HTTP " + response.getStatusCode());
-                        System.err.println("Response: " + response.getBody());
+                        System.err.println("❌ Failed to fetch Cisco page " + pageIndex + ": HTTP " + response.getStatusCode());
                         break;
                     }
 
@@ -397,7 +204,7 @@ public class ApiService {
                     JsonNode advList = root.path("advisories");
                     
                     if (!advList.isArray() || advList.isEmpty()) {
-                        System.out.println("No more advisories to fetch");
+                        System.out.println("✅ No more advisories to fetch");
                         hasMorePages = false;
                         break;
                     }
@@ -431,6 +238,14 @@ public class ApiService {
                                 advisoryEntity.setCwe(mapper.valueToTree(cwes));
                                 advisoryEntity.setProductnames(mapper.valueToTree(products));
 
+                                // Try to fetch CSAF data
+                                String csafUrl = "https://sec.cloudapps.cisco.com/security/center/contentjson/CiscoSecurityAdvisory/"
+                                        + advisoryId + "/csaf/" + advisoryId + ".json";
+                                JsonNode csafData = fetchCsafData(csafUrl, token);
+                                if (csafData != null && !csafData.isEmpty()) {
+                                    advisoryEntity.setCsaf(csafData);
+                                }
+
                                 boolean existsBefore = advisoryRepository.existsById(cveId);
                                 advisoryRepository.save(advisoryEntity);
                                 if (!existsBefore) added++;
@@ -457,7 +272,8 @@ public class ApiService {
             
         } catch (Exception e) {
             System.err.println("❌ Failed to fetch Cisco advisories: " + e.getMessage());
-            // Don't throw exception to allow NVD to continue
+            // Fall back to NVD data
+            fetchCiscoDataFromNVD();
         }
 
         log.setTotalData((int) advisoryRepository.count());
@@ -469,7 +285,31 @@ public class ApiService {
     }
 
     /**
-     * Fallback method to fetch Cisco-related data from NVD when Cisco API fails
+     * Fetch CSAF data for an advisory
+     */
+    private JsonNode fetchCsafData(String csafUrl, String token) {
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
+            headers.set("Authorization", "Bearer " + token);
+            
+            HttpEntity<String> requestEntity = new HttpEntity<>(headers);
+            ResponseEntity<String> response = restTemplate.exchange(csafUrl, HttpMethod.GET, requestEntity, String.class);
+            
+            if (response.getStatusCode().is2xxSuccessful()) {
+                return mapper.readTree(response.getBody());
+            } else {
+                System.err.println("⚠️ CSAF fetch failed (" + csafUrl + "): HTTP " + response.getStatusCode());
+                return mapper.createObjectNode();
+            }
+        } catch (Exception e) {
+            System.err.println("⚠️ CSAF fetch failed for " + csafUrl + ": " + e.getMessage());
+            return mapper.createObjectNode();
+        }
+    }
+
+    /**
+     * Fallback method to fetch Cisco-related data from NVD
      */
     public void fetchCiscoDataFromNVD() {
         System.out.println("🔄 Falling back to NVD for Cisco-related vulnerabilities...");
@@ -594,5 +434,40 @@ public class ApiService {
             }
         }
         return list;
+    }
+
+    // === Registration Help Method ===
+
+    public Map<String, Object> getRegistrationInstructions() {
+        return Map.of(
+            "registration_steps", Arrays.asList(
+                "1. Go to: https://apiconsole.cisco.com/",
+                "2. Login with your Cisco account (create one if needed)",
+                "3. Click on 'My Apps & Keys' in the top navigation",
+                "4. Click 'Register a New App' button",
+                "5. Fill in the application details:",
+                "   - Application Name: YourAppName-Service",
+                "   - Application Type: SELECT 'Service'",
+                "   - Grant Type: SELECT 'Client Credentials'", 
+                "   - API Subscriptions: SELECT 'Cisco PSIRT openVuln API'",
+                "   - Description: (Optional) Your application description",
+                "   - Agree to terms of service",
+                "6. Click 'Register'",
+                "7. Copy the new Client ID and Client Secret",
+                "8. Update your application configuration with new credentials"
+            ),
+            "important_notes", Arrays.asList(
+                "⚠️  Current registered applications might be deprecated - you may need to migrate",
+                "⚠️  Application Type MUST be 'Service' (not 'Web' or other types)",
+                "⚠️  Grant Type MUST be 'Client Credentials'",
+                "⚠️  Make sure you subscribe to 'Cisco PSIRT openVuln API'",
+                "⚠️  Keep your Client Secret secure and never commit to version control"
+            ),
+            "troubleshooting_resources", Arrays.asList(
+                "Cisco PSIRT API Documentation: https://developer.cisco.com/docs/psirt/",
+                "API Migration Guide: https://developer.cisco.com/docs/psirt/#!migrating-applications",
+                "Getting Started: https://developer.cisco.com/docs/psirt/#!getting-started"
+            )
+        );
     }
 }
