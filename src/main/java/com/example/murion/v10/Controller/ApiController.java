@@ -108,4 +108,19 @@ public class ApiController {
             "version", "1.0"
         );
     }
+@GetMapping("/fetch/all")
+public Map<String, Object> fetchAllData() {
+    return apiService.fetchAllData();
 }
+
+@GetMapping("/stats/database")
+public Map<String, Object> getDatabaseStats() {
+    return apiService.getDatabaseStats();
+}
+
+@GetMapping("/test/cisco-api")
+public Map<String, Object> testCiscoApi() {
+    return apiService.testCiscoApiData();
+}
+}
+
