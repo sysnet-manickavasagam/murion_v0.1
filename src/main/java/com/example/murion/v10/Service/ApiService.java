@@ -23,14 +23,13 @@ import java.time.LocalDateTime;
 import java.util.*;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
+import java.util.Base64;
 
 /**
  * ApiService - unified service that:
  *  - fetches & stores Cisco advisories (with OAuth token)
  *  - fetches NVD summary and updates vendor logs
  *  - updates VendorFetchLog for both vendors
- *
- * Note: keep your CLIENT_ID/CLIENT_SECRET secure (use config/env in production).
  */
 @Service
 public class ApiService {
@@ -44,7 +43,7 @@ public class ApiService {
     @Autowired
     private VendorFetchLogRepository logRepository;
 
-    // --- Cisco OAuth2 Credentials (move to config/env in production) ---
+    // --- Cisco OAuth2 Credentials ---
     private static final String CLIENT_ID = "q37wu5ga3695r3jfzccnfp8q";
     private static final String CLIENT_SECRET = "aB54S9PgZuTD87TpumQPw2Yq";
     private static final String TOKEN_URL = "https://id.cisco.com/oauth2/default/v1/token";
@@ -85,7 +84,7 @@ public class ApiService {
         }
     }
 
-    // --- Cisco: obtain OAuth2 token (cached until expiry) ---
+    // --- Cisco: obtain OAuth2 token with Basic Auth ---
     private String getAccessToken() {
         if (accessToken != null && tokenExpiry != null && LocalDateTime.now().isBefore(tokenExpiry)) {
             return accessToken;
@@ -94,20 +93,25 @@ public class ApiService {
         try {
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+            
+            // Use Basic Authentication instead of sending credentials in body
+            String auth = CLIENT_ID + ":" + CLIENT_SECRET;
+            String encodedAuth = Base64.getEncoder().encodeToString(auth.getBytes(StandardCharsets.UTF_8));
+            headers.set("Authorization", "Basic " + encodedAuth);
 
-            // Cisco expects client credentials in body OR Basic auth depending on registration.
-            // Here we put in body (works per docs examples) — if your app requires Basic Auth, switch to Basic header.
             MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
             body.add("grant_type", "client_credentials");
-            body.add("client_id", CLIENT_ID);
-            body.add("client_secret", CLIENT_SECRET);
+            // Remove client_id and client_secret from body when using Basic Auth
 
             HttpEntity<MultiValueMap<String, String>> requestEntity = new HttpEntity<>(body, headers);
 
+            System.out.println("🔑 Requesting Cisco OAuth2 token...");
             ResponseEntity<String> response = restTemplate.postForEntity(TOKEN_URL, requestEntity, String.class);
 
             if (!response.getStatusCode().is2xxSuccessful()) {
-                throw new RuntimeException("Token request failed: HTTP " + response.getStatusCode());
+                System.err.println("Token request failed: HTTP " + response.getStatusCode());
+                System.err.println("Response body: " + response.getBody());
+                throw new RuntimeException("Token request failed: HTTP " + response.getStatusCode() + " - " + response.getBody());
             }
 
             JsonNode tokenResponse = mapper.readTree(response.getBody());
@@ -119,10 +123,10 @@ public class ApiService {
                 throw new RuntimeException("Token response missing access_token: " + response.getBody());
             }
 
-            System.out.println("🔑 New Cisco access token obtained (expires in " + expiresIn + "s)");
+            System.out.println("✅ New Cisco access token obtained (expires in " + expiresIn + "s)");
             return accessToken;
         } catch (Exception e) {
-            // include response body in earlier troubleshooting logs if needed
+            System.err.println("❌ Failed to obtain Cisco OAuth2 token: " + e.getMessage());
             throw new RuntimeException("Failed to obtain Cisco OAuth2 token: " + e.getMessage(), e);
         }
     }
@@ -150,6 +154,15 @@ public class ApiService {
 
         System.out.println("🚀 Fetching Cisco advisories...");
 
+        try {
+            // Test token first
+            String token = getAccessToken();
+            System.out.println("✅ Token obtained successfully, starting data fetch...");
+        } catch (Exception e) {
+            System.err.println("❌ Failed to get access token: " + e.getMessage());
+            return;
+        }
+
         while (true) {
             try {
                 String url = baseUrl + "?pageIndex=" + pageIndex + "&pageSize=" + pageSize;
@@ -162,19 +175,28 @@ public class ApiService {
 
                 if (!response.getStatusCode().is2xxSuccessful()) {
                     System.err.println("Failed to fetch Cisco page " + pageIndex + ": HTTP " + response.getStatusCode());
+                    System.err.println("Response: " + response.getBody());
                     break;
                 }
 
                 JsonNode root = mapper.readTree(response.getBody());
                 JsonNode advList = root.path("advisories");
-                if (!advList.isArray() || advList.isEmpty()) break;
+                if (!advList.isArray() || advList.isEmpty()) {
+                    System.out.println("No more advisories to fetch");
+                    break;
+                }
+
+                System.out.println("📄 Processing page " + pageIndex + " with " + advList.size() + " advisories");
 
                 for (JsonNode adv : advList) {
                     String advisoryId = adv.path("advisoryId").asText(null);
                     if (advisoryId == null) continue;
 
                     List<String> cveIds = extractList(adv.path("cves"));
-                    if (cveIds.isEmpty()) continue;
+                    if (cveIds.isEmpty()) {
+                        System.out.println("⚠️ Advisory " + advisoryId + " has no CVEs, skipping");
+                        continue;
+                    }
 
                     Map<String, Object> ciscoData = buildCiscoData(adv);
                     List<String> bugIds = extractList(adv.path("bugIDs"));
@@ -185,7 +207,10 @@ public class ApiService {
                             + advisoryId + "/csaf/" + advisoryId + ".json";
 
                     JsonNode csafData = fetchCsafData(csafUrl);
-                    if (csafData == null || csafData.isEmpty()) continue;
+                    if (csafData == null || csafData.isEmpty()) {
+                        System.out.println("⚠️ No CSAF data for advisory " + advisoryId);
+                        continue;
+                    }
 
                     for (String cveId : cveIds) {
                         try {
@@ -210,17 +235,23 @@ public class ApiService {
                             boolean existsBefore = advisoryRepository.existsById(cveId);
                             advisoryRepository.save(advisoryEntity);
                             if (!existsBefore) added++;
+                            
+                            System.out.println("💾 Saved CVE: " + cveId + " from advisory: " + advisoryId);
                         } catch (Exception ex) {
-                            System.err.println("Error saving CVE " + ex.getMessage());
+                            System.err.println("❌ Error saving CVE " + cveId + ": " + ex.getMessage());
                         }
                     }
                 }
 
-                if (advList.size() < pageSize) break;
+                if (advList.size() < pageSize) {
+                    System.out.println("✅ Reached last page");
+                    break;
+                }
                 pageIndex++;
 
             } catch (Exception e) {
-                System.err.println("Error fetching Cisco page " + pageIndex + ": " + e.getMessage());
+                System.err.println("❌ Error fetching Cisco page " + pageIndex + ": " + e.getMessage());
+                e.printStackTrace();
                 break;
             }
         }
@@ -233,7 +264,6 @@ public class ApiService {
     }
 
     // === NVD: Fetch summary & update VendorFetchLog ===
-    // Runs every 12 hours (offset 30 min) — adjust cron as needed.
     @Scheduled(cron = "0 30 */12 * * *")
     public void scheduledFetchNvdAndLog() {
         fetchNVDData();
@@ -241,7 +271,6 @@ public class ApiService {
 
     /**
      * Public method to fetch NVD summary and update VendorFetchLog.
-     * Returns a Map with the summary (status, totalResults, added).
      */
     public Map<String, Object> fetchNVDData() {
         String vendor = "NVD";
@@ -269,7 +298,6 @@ public class ApiService {
             JsonNode root = mapper.readTree(response.getBody());
             int totalResults = root.path("totalResults").asInt(0);
 
-            // compute addedData relative to previous log totalData
             Integer previousTotal = log.getTotalData();
             int added = (previousTotal != null) ? Math.max(0, totalResults - previousTotal) : totalResults;
 
@@ -292,7 +320,7 @@ public class ApiService {
         }
     }
 
-    // --- helpers ---
+    // --- Helper methods ---
 
     private Map<String, Object> buildCiscoData(JsonNode adv) {
         Map<String, Object> data = new LinkedHashMap<>();
