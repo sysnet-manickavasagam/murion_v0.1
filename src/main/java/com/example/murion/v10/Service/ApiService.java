@@ -19,11 +19,19 @@ import org.springframework.web.client.RestTemplate;
 
 import javax.net.ssl.*;
 import java.nio.charset.StandardCharsets;
-import java.security.SecureRandom;
-import java.security.cert.X509Certificate;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 
+/**
+ * ApiService - unified service that:
+ *  - fetches & stores Cisco advisories (with OAuth token)
+ *  - fetches NVD summary and updates vendor logs
+ *  - updates VendorFetchLog for both vendors
+ *
+ * Note: keep your CLIENT_ID/CLIENT_SECRET secure (use config/env in production).
+ */
 @Service
 public class ApiService {
 
@@ -36,6 +44,7 @@ public class ApiService {
     @Autowired
     private VendorFetchLogRepository logRepository;
 
+    // --- Cisco OAuth2 Credentials (move to config/env in production) ---
     private static final String CLIENT_ID = "q37wu5ga3695r3jfzccnfp8q";
     private static final String CLIENT_SECRET = "aB54S9PgZuTD87TpumQPw2Yq";
     private static final String TOKEN_URL = "https://id.cisco.com/oauth2/default/v1/token";
@@ -47,6 +56,7 @@ public class ApiService {
         this.restTemplate = createUnsafeRestTemplate();
     }
 
+    // --- Disable SSL Verification for Cisco API (for testing only) ---
     private RestTemplate createUnsafeRestTemplate() {
         try {
             TrustManager[] trustAllCerts = new TrustManager[]{
@@ -75,6 +85,7 @@ public class ApiService {
         }
     }
 
+    // --- Cisco: obtain OAuth2 token (cached until expiry) ---
     private String getAccessToken() {
         if (accessToken != null && tokenExpiry != null && LocalDateTime.now().isBefore(tokenExpiry)) {
             return accessToken;
@@ -84,13 +95,16 @@ public class ApiService {
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
 
+            // Cisco expects client credentials in body OR Basic auth depending on registration.
+            // Here we put in body (works per docs examples) — if your app requires Basic Auth, switch to Basic header.
             MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
             body.add("grant_type", "client_credentials");
             body.add("client_id", CLIENT_ID);
             body.add("client_secret", CLIENT_SECRET);
 
-            HttpEntity<MultiValueMap<String, String>> entity = new HttpEntity<>(body, headers);
-            ResponseEntity<String> response = restTemplate.postForEntity(TOKEN_URL, entity, String.class);
+            HttpEntity<MultiValueMap<String, String>> requestEntity = new HttpEntity<>(body, headers);
+
+            ResponseEntity<String> response = restTemplate.postForEntity(TOKEN_URL, requestEntity, String.class);
 
             if (!response.getStatusCode().is2xxSuccessful()) {
                 throw new RuntimeException("Token request failed: HTTP " + response.getStatusCode());
@@ -108,6 +122,7 @@ public class ApiService {
             System.out.println("🔑 New Cisco access token obtained (expires in " + expiresIn + "s)");
             return accessToken;
         } catch (Exception e) {
+            // include response body in earlier troubleshooting logs if needed
             throw new RuntimeException("Failed to obtain Cisco OAuth2 token: " + e.getMessage(), e);
         }
     }
@@ -142,8 +157,8 @@ public class ApiService {
                 headers.set("Authorization", "Bearer " + getAccessToken());
                 headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
 
-                HttpEntity<String> entity = new HttpEntity<>(headers);
-                ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, entity, String.class);
+                HttpEntity<String> requestEntity = new HttpEntity<>(headers);
+                ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, requestEntity, String.class);
 
                 if (!response.getStatusCode().is2xxSuccessful()) {
                     System.err.println("Failed to fetch Cisco page " + pageIndex + ": HTTP " + response.getStatusCode());
@@ -218,12 +233,17 @@ public class ApiService {
     }
 
     // === NVD: Fetch summary & update VendorFetchLog ===
+    // Runs every 12 hours (offset 30 min) — adjust cron as needed.
     @Scheduled(cron = "0 30 */12 * * *")
     public void scheduledFetchNvdAndLog() {
-        fetchAndLogNvd();
+        fetchNVDData();
     }
 
-    public Map<String, Object> fetchAndLogNvd() {
+    /**
+     * Public method to fetch NVD summary and update VendorFetchLog.
+     * Returns a Map with the summary (status, totalResults, added).
+     */
+    public Map<String, Object> fetchNVDData() {
         String vendor = "NVD";
         LocalDateTime startTime = LocalDateTime.now();
 
@@ -248,8 +268,10 @@ public class ApiService {
 
             JsonNode root = mapper.readTree(response.getBody());
             int totalResults = root.path("totalResults").asInt(0);
-            int previousTotal = (log.getTotalData() != null) ? log.getTotalData() : 0;
-            int added = Math.max(0, totalResults - previousTotal);
+
+            // compute addedData relative to previous log totalData
+            Integer previousTotal = log.getTotalData();
+            int added = (previousTotal != null) ? Math.max(0, totalResults - previousTotal) : totalResults;
 
             log.setTotalData(totalResults);
             log.setAddedData(added);
@@ -269,6 +291,8 @@ public class ApiService {
             return Map.of("status", "error", "message", e.getMessage());
         }
     }
+
+    // --- helpers ---
 
     private Map<String, Object> buildCiscoData(JsonNode adv) {
         Map<String, Object> data = new LinkedHashMap<>();
@@ -298,8 +322,8 @@ public class ApiService {
         try {
             HttpHeaders headers = new HttpHeaders();
             headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
-            HttpEntity<String> entity = new HttpEntity<>(headers);
-            ResponseEntity<String> response = restTemplate.exchange(csafUrl, HttpMethod.GET, entity, String.class);
+            HttpEntity<String> requestEntity = new HttpEntity<>(headers);
+            ResponseEntity<String> response = restTemplate.exchange(csafUrl, HttpMethod.GET, requestEntity, String.class);
             if (!response.getStatusCode().is2xxSuccessful()) {
                 System.err.println("CSAF fetch failed (" + csafUrl + "): HTTP " + response.getStatusCode());
                 return mapper.createObjectNode();
