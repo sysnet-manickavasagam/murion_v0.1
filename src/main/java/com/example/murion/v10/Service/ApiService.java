@@ -41,23 +41,19 @@ public class ApiService {
     private LocalDateTime tokenExpiry;
 
     public ApiService() {
-        // Use standard RestTemplate without SSL bypass
         this.restTemplate = createRestTemplate();
     }
 
     private RestTemplate createRestTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        // Set timeouts
-        factory.setConnectTimeout(30000);
-        factory.setReadTimeout(30000);
+        // Remove timeouts completely to fetch all data
+        factory.setConnectTimeout(0);
+        factory.setReadTimeout(0);
         return new RestTemplate(factory);
     }
 
     // === Cisco OAuth2 Token Methods ===
 
-    /**
-     * Get OAuth2 access token from Cisco
-     */
     private String getAccessToken() {
         if (accessToken != null && tokenExpiry != null && LocalDateTime.now().isBefore(tokenExpiry)) {
             return accessToken;
@@ -78,9 +74,7 @@ public class ApiService {
             ResponseEntity<String> response = restTemplate.postForEntity(TOKEN_URL, requestEntity, String.class);
 
             if (!response.getStatusCode().is2xxSuccessful()) {
-                String errorMsg = "Token request failed: HTTP " + response.getStatusCode() + " - " + response.getBody();
-                System.err.println(errorMsg);
-                throw new RuntimeException(errorMsg);
+                throw new RuntimeException("Token request failed: HTTP " + response.getStatusCode());
             }
 
             JsonNode tokenResponse = mapper.readTree(response.getBody());
@@ -89,71 +83,20 @@ public class ApiService {
             tokenExpiry = LocalDateTime.now().plusSeconds(Math.max(expiresIn - 60, 30));
 
             if (accessToken == null || accessToken.isEmpty()) {
-                throw new RuntimeException("Token response missing access_token: " + response.getBody());
+                throw new RuntimeException("Token response missing access_token");
             }
 
             System.out.println("✅ New Cisco access token obtained (expires in " + expiresIn + "s)");
             return accessToken;
         } catch (Exception e) {
-            System.err.println("❌ Failed to obtain Cisco OAuth2 token: " + e.getMessage());
             throw new RuntimeException("Failed to obtain Cisco OAuth2 token: " + e.getMessage(), e);
-        }
-    }
-
-    /**
-     * Test Cisco credentials with detailed error handling
-     */
-    public Map<String, Object> testCiscoCredentials() {
-        try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-            
-            MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
-            body.add("grant_type", "client_credentials");
-            body.add("client_id", CLIENT_ID);
-            body.add("client_secret", CLIENT_SECRET);
-
-            HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(body, headers);
-
-            System.out.println("🔑 Testing Cisco credentials with standard RestTemplate...");
-            
-            ResponseEntity<String> response = restTemplate.postForEntity(TOKEN_URL, request, String.class);
-
-            if (response.getStatusCode().is2xxSuccessful()) {
-                JsonNode tokenResponse = mapper.readTree(response.getBody());
-                String token = tokenResponse.path("access_token").asText();
-                int expiresIn = tokenResponse.path("expires_in").asInt();
-                
-                return Map.of(
-                    "status", "success",
-                    "message", "Cisco OAuth2 authentication successful!",
-                    "token_type", tokenResponse.path("token_type").asText(),
-                    "expires_in_seconds", expiresIn,
-                    "token_length", token != null ? token.length() : 0,
-                    "scope", tokenResponse.path("scope").asText("")
-                );
-            } else {
-                return Map.of(
-                    "status", "error",
-                    "http_status", response.getStatusCode().toString(),
-                    "response_body", response.getBody(),
-                    "message", "Authentication failed - Application may not be properly registered",
-                    "solution", "Please register a new application at https://apiconsole.cisco.com/ with type 'Service' and grant type 'Client Credentials'"
-                );
-            }
-        } catch (Exception e) {
-            return Map.of(
-                "status", "error",
-                "message", e.getMessage(),
-                "solution", "Your current credentials are not working. Please register a new application in Cisco API Console."
-            );
         }
     }
 
     // === Cisco Advisory Methods ===
 
     /**
-     * Fetch and store Cisco advisories
+     * Fetch and store ALL Cisco advisories without limits
      */
     @Scheduled(cron = "0 0 */6 * * *")
     public void fetchAndStoreCiscoAdvisories() {
@@ -170,34 +113,46 @@ public class ApiService {
         log.setLastFetchTime(startTime);
 
         int added = 0;
+        int updated = 0;
+        int skippedNoCVE = 0;
         long totalBefore = advisoryRepository.count();
 
-        System.out.println("🚀 Starting Cisco advisories fetch...");
+        System.out.println("🚀 Starting COMPLETE Cisco advisories fetch (NO LIMITS)...");
 
         try {
-            // Get access token first
             String token = getAccessToken();
-            System.out.println("✅ Authentication successful, starting data fetch...");
+            System.out.println("✅ Authentication successful, starting complete data fetch...");
             
-            // Fetch advisories from Cisco API
-            String baseUrl = "https://apix.cisco.com/security/advisories/v2/all";
-            int pageIndex = 1, pageSize = 10; // Start with small page size for testing
+            // First, get the total count to understand the data size
+            Map<String, Object> apiInfo = getCiscoApiMetadata(token);
+            int totalAdvisories = (int) apiInfo.getOrDefault("total_advisories", 0);
+            int totalPages = (int) apiInfo.getOrDefault("total_pages", 0);
+            
+            System.out.println("📊 Total advisories available: " + totalAdvisories);
+            System.out.println("📄 Total pages available: " + totalPages);
 
+            String baseUrl = "https://apix.cisco.com/security/advisories/v2/all";
+            int pageIndex = 1;
+            int pageSize = 100; // Use maximum page size for efficiency
             boolean hasMorePages = true;
             
-            while (hasMorePages && pageIndex <= 5) { // Limit to 5 pages for initial testing
+            // Fetch ALL pages - no limits
+            while (hasMorePages) {
                 try {
                     String url = baseUrl + "?pageIndex=" + pageIndex + "&pageSize=" + pageSize;
                     HttpHeaders headers = new HttpHeaders();
                     headers.set("Authorization", "Bearer " + token);
                     headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
 
+                    System.out.println("📥 Fetching page " + pageIndex + " of " + totalPages + "...");
                     HttpEntity<String> requestEntity = new HttpEntity<>(headers);
                     ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, requestEntity, String.class);
 
                     if (!response.getStatusCode().is2xxSuccessful()) {
                         System.err.println("❌ Failed to fetch Cisco page " + pageIndex + ": HTTP " + response.getStatusCode());
-                        break;
+                        // Continue to next page instead of breaking
+                        pageIndex++;
+                        continue;
                     }
 
                     JsonNode root = mapper.readTree(response.getBody());
@@ -209,22 +164,31 @@ public class ApiService {
                         break;
                     }
 
-                    System.out.println("📄 Processing page " + pageIndex + " with " + advList.size() + " advisories");
+                    System.out.println("🔄 Processing page " + pageIndex + " with " + advList.size() + " advisories");
 
+                    int pageAdded = 0;
+                    int pageUpdated = 0;
+                    int pageSkipped = 0;
+                    
                     for (JsonNode adv : advList) {
                         String advisoryId = adv.path("advisoryId").asText(null);
                         if (advisoryId == null) continue;
 
                         List<String> cveIds = extractList(adv.path("cves"));
                         if (cveIds.isEmpty()) {
-                            System.out.println("⚠️ Advisory " + advisoryId + " has no CVEs, skipping");
+                            skippedNoCVE++;
+                            pageSkipped++;
                             continue;
                         }
 
-                        // Process each CVE
+                        // Process each CVE from this advisory
                         for (String cveId : cveIds) {
                             try {
-                                CiscoAdvisory advisoryEntity = advisoryRepository.findById(cveId).orElse(new CiscoAdvisory());
+                                Optional<CiscoAdvisory> existingAdvisory = advisoryRepository.findById(cveId);
+                                CiscoAdvisory advisoryEntity = existingAdvisory.orElse(new CiscoAdvisory());
+                                
+                                boolean isNew = !existingAdvisory.isPresent();
+                                
                                 advisoryEntity.setCveId(cveId);
                                 
                                 Map<String, Object> ciscoData = buildCiscoData(adv);
@@ -238,7 +202,7 @@ public class ApiService {
                                 advisoryEntity.setCwe(mapper.valueToTree(cwes));
                                 advisoryEntity.setProductnames(mapper.valueToTree(products));
 
-                                // Try to fetch CSAF data
+                                // Fetch CSAF data for all entries (comprehensive approach)
                                 String csafUrl = "https://sec.cloudapps.cisco.com/security/center/contentjson/CiscoSecurityAdvisory/"
                                         + advisoryId + "/csaf/" + advisoryId + ".json";
                                 JsonNode csafData = fetchCsafData(csafUrl, token);
@@ -246,47 +210,229 @@ public class ApiService {
                                     advisoryEntity.setCsaf(csafData);
                                 }
 
-                                boolean existsBefore = advisoryRepository.existsById(cveId);
                                 advisoryRepository.save(advisoryEntity);
-                                if (!existsBefore) added++;
                                 
-                                System.out.println("💾 Saved CVE: " + cveId + " from advisory: " + advisoryId);
+                                if (isNew) {
+                                    added++;
+                                    pageAdded++;
+                                } else {
+                                    updated++;
+                                    pageUpdated++;
+                                }
+                                
                             } catch (Exception ex) {
                                 System.err.println("❌ Error saving CVE " + cveId + ": " + ex.getMessage());
                             }
                         }
                     }
 
-                    if (advList.size() < pageSize) {
-                        System.out.println("✅ Reached last page");
-                        hasMorePages = false;
-                    }
-                    pageIndex++;
+                    System.out.println("✅ Page " + pageIndex + " completed: " + 
+                                     pageAdded + " added, " + pageUpdated + " updated, " + pageSkipped + " skipped (no CVEs)");
 
+                    // Check if we've reached the last page
+                    if (advList.size() < pageSize) {
+                        System.out.println("🎉 Reached final page! Fetch complete.");
+                        hasMorePages = false;
+                    } else {
+                        pageIndex++;
+                    }
+
+                    // Small delay to be respectful to the API (1 second)
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                    
                 } catch (Exception e) {
                     System.err.println("❌ Error fetching Cisco page " + pageIndex + ": " + e.getMessage());
-                    hasMorePages = false;
-                    break;
+                    // Continue to next page instead of breaking
+                    pageIndex++;
                 }
             }
             
         } catch (Exception e) {
             System.err.println("❌ Failed to fetch Cisco advisories: " + e.getMessage());
-            // Fall back to NVD data
-            fetchCiscoDataFromNVD();
+            // Even if main fetch fails, try NVD fallback
+            fetchAllCiscoDataFromNVD();
         }
 
-        log.setTotalData((int) advisoryRepository.count());
+        long totalAfter = advisoryRepository.count();
+        log.setTotalData((int) totalAfter);
         log.setAddedData(added);
         logRepository.save(log);
 
-        System.out.println("✅ Cisco advisories update completed. Added: " + added + 
-                         " (before: " + totalBefore + ", after: " + advisoryRepository.count() + ")");
+        System.out.println("🎉 COMPLETE Cisco advisories fetch finished!");
+        System.out.println("📊 FINAL SUMMARY:");
+        System.out.println("   - Records before: " + totalBefore);
+        System.out.println("   - New records added: " + added);
+        System.out.println("   - Existing records updated: " + updated);
+        System.out.println("   - Advisories skipped (no CVEs): " + skippedNoCVE);
+        System.out.println("   - Records after: " + totalAfter);
+        System.out.println("   - Net change: " + (totalAfter - totalBefore));
     }
 
     /**
-     * Fetch CSAF data for an advisory
+     * Get Cisco API metadata including total counts
      */
+    private Map<String, Object> getCiscoApiMetadata(String token) {
+        try {
+            String testUrl = "https://apix.cisco.com/security/advisories/v2/all?pageIndex=1&pageSize=1";
+            
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("Authorization", "Bearer " + token);
+            headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
+
+            HttpEntity<String> requestEntity = new HttpEntity<>(headers);
+            ResponseEntity<String> response = restTemplate.exchange(testUrl, HttpMethod.GET, requestEntity, String.class);
+
+            if (response.getStatusCode().is2xxSuccessful()) {
+                JsonNode root = mapper.readTree(response.getBody());
+                return Map.of(
+                    "total_advisories", root.path("totalAdvisories").asInt(0),
+                    "total_pages", root.path("totalPages").asInt(0),
+                    "status", "success"
+                );
+            }
+        } catch (Exception e) {
+            System.err.println("❌ Failed to get API metadata: " + e.getMessage());
+        }
+        return Map.of("total_advisories", 0, "total_pages", 0, "status", "error");
+    }
+
+    /**
+     * Public method to test Cisco API
+     */
+    public Map<String, Object> testCiscoApiData() {
+        try {
+            String token = getAccessToken();
+            return getCiscoApiMetadata(token);
+        } catch (Exception e) {
+            return Map.of("status", "error", "message", e.getMessage());
+        }
+    }
+
+    /**
+     * Fetch ALL Cisco-related data from NVD (no limits)
+     */
+    public void fetchAllCiscoDataFromNVD() {
+        System.out.println("🔄 Starting COMPLETE NVD data fetch for Cisco-related vulnerabilities...");
+        
+        int totalProcessed = 0;
+        int startIndex = 0;
+        int resultsPerPage = 2000; // Use maximum allowed by NVD
+        
+        // Fetch ALL pages from NVD - no limits
+        while (true) {
+            try {
+                String url = "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=cisco&resultsPerPage=" + 
+                           resultsPerPage + "&startIndex=" + startIndex;
+                
+                System.out.println("📥 Fetching NVD data from index " + startIndex + "...");
+                ResponseEntity<String> response = restTemplate.getForEntity(url, String.class);
+                
+                if (!response.getStatusCode().is2xxSuccessful()) {
+                    System.err.println("❌ NVD fetch failed: HTTP " + response.getStatusCode());
+                    break;
+                }
+
+                JsonNode root = mapper.readTree(response.getBody());
+                JsonNode vulnerabilities = root.path("vulnerabilities");
+                
+                if (!vulnerabilities.isArray() || vulnerabilities.size() == 0) {
+                    System.out.println("✅ No more NVD vulnerabilities to process");
+                    break;
+                }
+
+                int pageProcessed = 0;
+                for (JsonNode vuln : vulnerabilities) {
+                    JsonNode cve = vuln.path("cve");
+                    String cveId = cve.path("id").asText();
+                    
+                    if (cveId != null && !cveId.isEmpty() && !advisoryRepository.existsById(cveId)) {
+                        CiscoAdvisory advisory = new CiscoAdvisory();
+                        advisory.setCveId(cveId);
+                        
+                        Map<String, Object> ciscoData = new HashMap<>();
+                        ciscoData.put("advisory_id", "NVD-" + cveId);
+                        ciscoData.put("advisory_title", cve.path("descriptions").get(0).path("value").asText(""));
+                        ciscoData.put("source", "NVD Complete");
+                        
+                        // Safely get CVSS score
+                        JsonNode metrics = cve.path("metrics");
+                        String cvssScore = "N/A";
+                        if (metrics.has("cvssMetricV2") && metrics.path("cvssMetricV2").isArray() && 
+                            metrics.path("cvssMetricV2").size() > 0) {
+                            cvssScore = metrics.path("cvssMetricV2").get(0).path("cvssData").path("baseScore").asText("N/A");
+                        } else if (metrics.has("cvssMetricV31") && metrics.path("cvssMetricV31").isArray() &&
+                                 metrics.path("cvssMetricV31").size() > 0) {
+                            cvssScore = metrics.path("cvssMetricV31").get(0).path("cvssData").path("baseScore").asText("N/A");
+                        }
+                        ciscoData.put("cvss_basescore", cvssScore);
+                        
+                        advisory.setCisco_data(mapper.valueToTree(ciscoData));
+                        advisoryRepository.save(advisory);
+                        pageProcessed++;
+                        totalProcessed++;
+                    }
+                }
+                
+                System.out.println("✅ Processed " + pageProcessed + " CVEs from NVD (total: " + totalProcessed + ")");
+                
+                // Check if we've reached the end
+                if (vulnerabilities.size() < resultsPerPage) {
+                    System.out.println("🎉 Reached final NVD page! Fetch complete.");
+                    break;
+                }
+                
+                startIndex += resultsPerPage;
+                
+                // Rate limiting delay (2 seconds)
+                try {
+                    Thread.sleep(2000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+                
+            } catch (Exception e) {
+                System.err.println("❌ Error fetching NVD data: " + e.getMessage());
+                break;
+            }
+        }
+        
+        System.out.println("🎉 COMPLETE NVD fetch finished! Total processed: " + totalProcessed + " CVEs");
+    }
+
+    /**
+     * Manual method to force fetch all data (can be called via API)
+     */
+    public Map<String, Object> fetchAllData() {
+        System.out.println("🚀 MANUAL TRIGGER: Starting COMPLETE data fetch...");
+        
+        long initialCount = advisoryRepository.count();
+        
+        // First try Cisco API
+        fetchAndStoreCiscoAdvisories();
+        
+        // Then supplement with NVD data
+        fetchAllCiscoDataFromNVD();
+        
+        long finalCount = advisoryRepository.count();
+        long totalAdded = finalCount - initialCount;
+        
+        return Map.of(
+            "status", "success",
+            "message", "Complete data fetch finished",
+            "initial_records", initialCount,
+            "final_records", finalCount,
+            "total_added", totalAdded,
+            "timestamp", LocalDateTime.now().toString()
+        );
+    }
+
+    // === CSAF Data Fetching ===
+
     private JsonNode fetchCsafData(String csafUrl, String token) {
         try {
             HttpHeaders headers = new HttpHeaders();
@@ -305,51 +451,6 @@ public class ApiService {
         } catch (Exception e) {
             System.err.println("⚠️ CSAF fetch failed for " + csafUrl + ": " + e.getMessage());
             return mapper.createObjectNode();
-        }
-    }
-
-    /**
-     * Fallback method to fetch Cisco-related data from NVD
-     */
-    public void fetchCiscoDataFromNVD() {
-        System.out.println("🔄 Falling back to NVD for Cisco-related vulnerabilities...");
-        
-        String url = "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=cisco&resultsPerPage=50";
-        
-        try {
-            ResponseEntity<String> response = restTemplate.getForEntity(url, String.class);
-            
-            if (response.getStatusCode().is2xxSuccessful()) {
-                JsonNode root = mapper.readTree(response.getBody());
-                JsonNode vulnerabilities = root.path("vulnerabilities");
-                
-                int processed = 0;
-                for (JsonNode vuln : vulnerabilities) {
-                    JsonNode cve = vuln.path("cve");
-                    String cveId = cve.path("id").asText();
-                    
-                    if (cveId != null && !cveId.isEmpty()) {
-                        CiscoAdvisory advisory = advisoryRepository.findById(cveId).orElse(new CiscoAdvisory());
-                        advisory.setCveId(cveId);
-                        
-                        // Create basic Cisco data structure from NVD data
-                        Map<String, Object> ciscoData = new HashMap<>();
-                        ciscoData.put("advisory_id", "NVD-" + cveId);
-                        ciscoData.put("advisory_title", cve.path("descriptions").get(0).path("value").asText(""));
-                        ciscoData.put("source", "NVD Fallback");
-                        ciscoData.put("cvss_basescore", 
-                            cve.path("metrics").path("cvssMetricV2").get(0).path("cvssData").path("baseScore").asText("N/A"));
-                        
-                        advisory.setCisco_data(mapper.valueToTree(ciscoData));
-                        advisoryRepository.save(advisory);
-                        processed++;
-                    }
-                }
-                
-                System.out.println("✅ Processed " + processed + " Cisco-related CVEs from NVD");
-            }
-        } catch (Exception e) {
-            System.err.println("❌ Error fetching Cisco data from NVD: " + e.getMessage());
         }
     }
 
@@ -373,7 +474,8 @@ public class ApiService {
         log.setPreviousFetchTime(log.getLastFetchTime());
         log.setLastFetchTime(startTime);
 
-        String url = "https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Cisco&resultsPerPage=100";
+        // Use maximum results per page for NVD
+        String url = "https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Cisco&resultsPerPage=2000";
         try {
             System.out.println("📡 Fetching NVD summary...");
             ResponseEntity<String> response = restTemplate.getForEntity(url, String.class);
@@ -396,12 +498,12 @@ public class ApiService {
 
             System.out.println("✅ NVD summary: totalResults=" + totalResults + ", added=" + added);
             
-            Map<String, Object> summary = new HashMap<>();
-            summary.put("status", "success");
-            summary.put("totalResults", totalResults);
-            summary.put("added", added);
-            summary.put("timestamp", new Date().toString());
-            return summary;
+            return Map.of(
+                "status", "success",
+                "totalResults", totalResults,
+                "added", added,
+                "timestamp", new Date().toString()
+            );
 
         } catch (Exception e) {
             System.err.println("❌ ERROR fetching NVD: " + e.getMessage());
@@ -436,38 +538,35 @@ public class ApiService {
         return list;
     }
 
-    // === Registration Help Method ===
+    // === Public Methods for API ===
 
-    public Map<String, Object> getRegistrationInstructions() {
+    public Map<String, Object> testCiscoCredentials() {
+        try {
+            String token = getAccessToken();
+            return Map.of(
+                "status", "success",
+                "message", "Cisco OAuth2 authentication successful!",
+                "token_type", "Bearer",
+                "expires_in_seconds", 3600,
+                "token_length", token.length()
+            );
+        } catch (Exception e) {
+            return Map.of(
+                "status", "error",
+                "message", e.getMessage()
+            );
+        }
+    }
+
+    /**
+     * Get database statistics
+     */
+    public Map<String, Object> getDatabaseStats() {
+        long totalRecords = advisoryRepository.count();
         return Map.of(
-            "registration_steps", Arrays.asList(
-                "1. Go to: https://apiconsole.cisco.com/",
-                "2. Login with your Cisco account (create one if needed)",
-                "3. Click on 'My Apps & Keys' in the top navigation",
-                "4. Click 'Register a New App' button",
-                "5. Fill in the application details:",
-                "   - Application Name: YourAppName-Service",
-                "   - Application Type: SELECT 'Service'",
-                "   - Grant Type: SELECT 'Client Credentials'", 
-                "   - API Subscriptions: SELECT 'Cisco PSIRT openVuln API'",
-                "   - Description: (Optional) Your application description",
-                "   - Agree to terms of service",
-                "6. Click 'Register'",
-                "7. Copy the new Client ID and Client Secret",
-                "8. Update your application configuration with new credentials"
-            ),
-            "important_notes", Arrays.asList(
-                "⚠️  Current registered applications might be deprecated - you may need to migrate",
-                "⚠️  Application Type MUST be 'Service' (not 'Web' or other types)",
-                "⚠️  Grant Type MUST be 'Client Credentials'",
-                "⚠️  Make sure you subscribe to 'Cisco PSIRT openVuln API'",
-                "⚠️  Keep your Client Secret secure and never commit to version control"
-            ),
-            "troubleshooting_resources", Arrays.asList(
-                "Cisco PSIRT API Documentation: https://developer.cisco.com/docs/psirt/",
-                "API Migration Guide: https://developer.cisco.com/docs/psirt/#!migrating-applications",
-                "Getting Started: https://developer.cisco.com/docs/psirt/#!getting-started"
-            )
+            "total_records", totalRecords,
+            "database", "Neon PostgreSQL",
+            "timestamp", LocalDateTime.now().toString()
         );
     }
 }
