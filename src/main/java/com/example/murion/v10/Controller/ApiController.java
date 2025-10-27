@@ -1,14 +1,13 @@
 package com.example.murion.v10.Controller;
 
 import com.example.murion.v10.Service.ApiService;
-import org.springframework.web.bind.annotation.*;
-import java.util.Map;
 import com.example.murion.v10.Entity.VendorFetchLog;
 import com.example.murion.v10.Repository.VendorFetchLogRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
 import java.util.List;
-
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api")
@@ -19,10 +18,10 @@ public class ApiController {
     public ApiController(ApiService apiService) {
         this.apiService = apiService;
     }
+
     @Autowired
     private VendorFetchLogRepository logRepository;
 
-    // Endpoint for Cisco security advisories only
     @GetMapping("/fetch/cisco")
     public ResponseEntity<Map<String, Object>> fetchCiscoData() {
         try {
@@ -33,32 +32,25 @@ public class ApiController {
         }
     }
 
-
-    // Endpoint for NVD data only
     @GetMapping("/nvd/cisco")
     public Map<String, Object> getNVDData() {
-        return apiService.fetchNVDData();
+        return apiService.fetchAndLogNvd();
     }
-    
+
+    @GetMapping("/fetch")
+    public Map<String, Object> getData() {
+        return apiService.fetchAndLogNvd();
+    }
+
     @GetMapping("/logs")
     public ResponseEntity<List<VendorFetchLog>> getAllLogs() {
         return ResponseEntity.ok(logRepository.findAll());
     }
 
-
-   
     @GetMapping("/logs/{vendor}")
     public ResponseEntity<VendorFetchLog> getVendorLog(@PathVariable String vendor) {
         return logRepository.findByVendorName(vendor)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
     }
-
-    // Original endpoint for backward compatibility (points to NVD)
-    @GetMapping("/fetch")
-    public Map<String, Object> getData() {
-        return apiService.fetchNVDData();
-    }
-
 }
-
