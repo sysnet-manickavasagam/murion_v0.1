@@ -59,11 +59,6 @@ public class ApiController {
 
     // === Diagnostic Endpoints ===
 
-    @GetMapping("/diagnose/cisco-auth")
-    public Map<String, Object> diagnoseCiscoAuth() {
-        return apiService.diagnoseCiscoAuth();
-    }
-
     @GetMapping("/test/cisco-auth")
     public Map<String, Object> testCiscoAuth() {
         return apiService.testCiscoCredentials();
