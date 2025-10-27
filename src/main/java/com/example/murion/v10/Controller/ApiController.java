@@ -1,13 +1,14 @@
 package com.example.murion.v10.Controller;
 
 import com.example.murion.v10.Service.ApiService;
-import org.springframework.web.bind.annotation.*;
-import java.util.Map;
 import com.example.murion.v10.Entity.VendorFetchLog;
 import com.example.murion.v10.Repository.VendorFetchLogRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api")
@@ -15,30 +16,73 @@ public class ApiController {
 
     private final ApiService apiService;
 
-    public ApiController(ApiService apiService) {
-        this.apiService = apiService;
-    }
-    
     @Autowired
     private VendorFetchLogRepository logRepository;
 
-    // Endpoint for Cisco security advisories only
+    public ApiController(ApiService apiService) {
+        this.apiService = apiService;
+    }
+
+    // === Cisco API Endpoints ===
+
     @GetMapping("/fetch/cisco")
     public ResponseEntity<Map<String, Object>> fetchCiscoData() {
         try {
             apiService.fetchAndStoreCiscoAdvisories();
-            return ResponseEntity.ok(Map.of("status", "success", "message", "Cisco advisories fetch triggered successfully"));
+            return ResponseEntity.ok(Map.of(
+                "status", "success", 
+                "message", "Cisco advisories fetch triggered successfully"
+            ));
         } catch (Exception e) {
-            return ResponseEntity.status(500).body(Map.of("status", "error", "message", e.getMessage()));
+            return ResponseEntity.status(500).body(Map.of(
+                "status", "error", 
+                "message", e.getMessage()
+            ));
         }
     }
 
-    // Endpoint for NVD data only
+    @GetMapping("/fetch/cisco-fallback")
+    public ResponseEntity<Map<String, Object>> fetchCiscoDataFromNVD() {
+        try {
+            apiService.fetchCiscoDataFromNVD();
+            return ResponseEntity.ok(Map.of(
+                "status", "success", 
+                "message", "Cisco data fetch from NVD fallback triggered successfully"
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(Map.of(
+                "status", "error", 
+                "message", e.getMessage()
+            ));
+        }
+    }
+
+    // === Diagnostic Endpoints ===
+
+    @GetMapping("/diagnose/cisco-auth")
+    public Map<String, Object> diagnoseCiscoAuth() {
+        return apiService.diagnoseCiscoAuth();
+    }
+
+    @GetMapping("/test/cisco-auth")
+    public Map<String, Object> testCiscoAuth() {
+        return apiService.testCiscoCredentials();
+    }
+
+    @GetMapping("/cisco-registration-help")
+    public Map<String, Object> getRegistrationHelp() {
+        return apiService.getRegistrationInstructions();
+    }
+
+    // === NVD API Endpoints ===
+
     @GetMapping("/nvd/cisco")
     public Map<String, Object> getNVDData() {
         return apiService.fetchNVDData();
     }
-    
+
+    // === Log Endpoints ===
+
     @GetMapping("/logs")
     public ResponseEntity<List<VendorFetchLog>> getAllLogs() {
         return ResponseEntity.ok(logRepository.findAll());
@@ -51,16 +95,22 @@ public class ApiController {
                 .orElse(ResponseEntity.notFound().build());
     }
 
-    // Original endpoint for backward compatibility (points to NVD)
+    // === Backward Compatibility ===
+
     @GetMapping("/fetch")
     public Map<String, Object> getData() {
         return apiService.fetchNVDData();
     }
 
-    // Add this to your ApiController
-@GetMapping("/test/cisco-auth")
-public Map<String, Object> testCiscoAuth() {
-    return apiService.testCredentials();
-}
-}
+    // === Health Check ===
 
+    @GetMapping("/health")
+    public Map<String, Object> healthCheck() {
+        return Map.of(
+            "status", "healthy",
+            "timestamp", new java.util.Date().toString(),
+            "service", "Murion Security API",
+            "version", "1.0"
+        );
+    }
+}
