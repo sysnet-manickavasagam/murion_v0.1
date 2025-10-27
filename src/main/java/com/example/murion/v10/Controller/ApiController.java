@@ -57,11 +57,21 @@ public class ApiController {
         }
     }
 
+    @GetMapping("/fetch/all")
+    public Map<String, Object> fetchAllData() {
+        return apiService.fetchAllData();
+    }
+
     // === Diagnostic Endpoints ===
 
     @GetMapping("/test/cisco-auth")
     public Map<String, Object> testCiscoAuth() {
         return apiService.testCiscoCredentials();
+    }
+
+    @GetMapping("/test/cisco-api")
+    public Map<String, Object> testCiscoApi() {
+        return apiService.testCiscoApiData();
     }
 
     @GetMapping("/cisco-registration-help")
@@ -90,6 +100,13 @@ public class ApiController {
                 .orElse(ResponseEntity.notFound().build());
     }
 
+    // === Stats Endpoints ===
+
+    @GetMapping("/stats/database")
+    public Map<String, Object> getDatabaseStats() {
+        return apiService.getDatabaseStats();
+    }
+
     // === Backward Compatibility ===
 
     @GetMapping("/fetch")
@@ -108,19 +125,4 @@ public class ApiController {
             "version", "1.0"
         );
     }
-@GetMapping("/fetch/all")
-public Map<String, Object> fetchAllData() {
-    return apiService.fetchAllData();
 }
-
-@GetMapping("/stats/database")
-public Map<String, Object> getDatabaseStats() {
-    return apiService.getDatabaseStats();
-}
-
-@GetMapping("/test/cisco-api")
-public Map<String, Object> testCiscoApi() {
-    return apiService.testCiscoApiData();
-}
-}
-
