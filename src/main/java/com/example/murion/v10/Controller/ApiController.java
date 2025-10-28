@@ -24,7 +24,27 @@ public class ApiController {
         this.apiService = apiService;
     }
 
-    // === Quick Fetch Endpoints (Render-compatible) ===
+    // === Complete Fetch Endpoints (ALL DATA) ===
+
+    @GetMapping("/fetch/complete")
+    public Map<String, Object> completeFetch() {
+        return apiService.completeFetch();
+    }
+
+    @GetMapping("/fetch/cisco-complete")
+    public ResponseEntity<Map<String, Object>> fetchAllCiscoData() {
+        try {
+            Map<String, Object> result = apiService.fetchAllCiscoAdvisories();
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(Map.of(
+                "status", "error", 
+                "message", e.getMessage()
+            ));
+        }
+    }
+
+    // === Quick Fetch Endpoints (for backward compatibility) ===
 
     @GetMapping("/fetch/quick")
     public Map<String, Object> quickFetch(@RequestParam(defaultValue = "5") int pages) {
