@@ -6,11 +6,10 @@ import com.example.murion.v10.Repository.CiscoAdvisoryRepository;
 import com.example.murion.v10.Repository.VendorFetchLogRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.*;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
@@ -19,6 +18,7 @@ import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
 @Service
 public class ApiService {
@@ -39,6 +39,10 @@ public class ApiService {
 
     private String accessToken;
     private LocalDateTime tokenExpiry;
+    
+    private volatile boolean isFetching = false;
+    private volatile int currentProgress = 0;
+    private volatile int totalPages = 0;
 
     public ApiService() {
         this.restTemplate = createRestTemplate();
@@ -46,8 +50,8 @@ public class ApiService {
 
     private RestTemplate createRestTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(0);
-        factory.setReadTimeout(0);
+        factory.setConnectTimeout(30000);
+        factory.setReadTimeout(30000);
         return new RestTemplate(factory);
     }
 
@@ -95,10 +99,30 @@ public class ApiService {
     // === Cisco Advisory Methods ===
 
     /**
-     * Fetch and store ALL Cisco advisories without limits
+     * Quick fetch with limited pages for health check compatibility
      */
     @Scheduled(cron = "0 0 */6 * * *")
-    public void fetchAndStoreCiscoAdvisories() {
+    public void scheduledQuickFetch() {
+        if (isFetching) {
+            System.out.println("⚠️ Fetch already in progress, skipping scheduled run");
+            return;
+        }
+        
+        // Quick fetch - only 5 pages to avoid timeout
+        quickFetchAndStoreCiscoAdvisories(5);
+    }
+
+    /**
+     * Quick fetch with limited pages
+     */
+    public Map<String, Object> quickFetchAndStoreCiscoAdvisories(int maxPages) {
+        if (isFetching) {
+            return Map.of("status", "error", "message", "Fetch already in progress");
+        }
+
+        isFetching = true;
+        currentProgress = 0;
+        
         String vendor = "Cisco";
         LocalDateTime startTime = LocalDateTime.now();
 
@@ -113,35 +137,35 @@ public class ApiService {
 
         int added = 0;
         int updated = 0;
-        int skippedNoCVE = 0;
         long totalBefore = advisoryRepository.count();
 
-        System.out.println("🚀 Starting COMPLETE Cisco advisories fetch (NO LIMITS)...");
+        System.out.println("🚀 Starting QUICK Cisco advisories fetch (" + maxPages + " pages max)...");
 
         try {
             String token = getAccessToken();
-            System.out.println("✅ Authentication successful, starting complete data fetch...");
+            System.out.println("✅ Authentication successful, starting quick data fetch...");
             
             String baseUrl = "https://apix.cisco.com/security/advisories/v2/all";
             int pageIndex = 1;
-            int pageSize = 100;
+            int pageSize = 50; // Smaller page size for faster processing
             boolean hasMorePages = true;
-            
-            while (hasMorePages) {
+            totalPages = 0;
+
+            while (hasMorePages && pageIndex <= maxPages) {
+                currentProgress = (pageIndex * 100) / maxPages;
+                
                 try {
                     String url = baseUrl + "?pageIndex=" + pageIndex + "&pageSize=" + pageSize;
                     HttpHeaders headers = new HttpHeaders();
                     headers.set("Authorization", "Bearer " + token);
                     headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
 
-                    System.out.println("📥 Fetching page " + pageIndex + "...");
                     HttpEntity<String> requestEntity = new HttpEntity<>(headers);
                     ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, requestEntity, String.class);
 
                     if (!response.getStatusCode().is2xxSuccessful()) {
                         System.err.println("❌ Failed to fetch Cisco page " + pageIndex + ": HTTP " + response.getStatusCode());
-                        pageIndex++;
-                        continue;
+                        break;
                     }
 
                     JsonNode root = mapper.readTree(response.getBody());
@@ -153,11 +177,10 @@ public class ApiService {
                         break;
                     }
 
-                    System.out.println("🔄 Processing page " + pageIndex + " with " + advList.size() + " advisories");
+                    System.out.println("📄 Processing page " + pageIndex + " with " + advList.size() + " advisories");
 
                     int pageAdded = 0;
                     int pageUpdated = 0;
-                    int pageSkipped = 0;
                     
                     for (JsonNode adv : advList) {
                         String advisoryId = adv.path("advisoryId").asText(null);
@@ -165,8 +188,6 @@ public class ApiService {
 
                         List<String> cveIds = extractList(adv.path("cves"));
                         if (cveIds.isEmpty()) {
-                            skippedNoCVE++;
-                            pageSkipped++;
                             continue;
                         }
 
@@ -206,31 +227,27 @@ public class ApiService {
                         }
                     }
 
-                    System.out.println("✅ Page " + pageIndex + " completed: " + 
-                                     pageAdded + " added, " + pageUpdated + " updated, " + pageSkipped + " skipped (no CVEs)");
+                    System.out.println("✅ Page " + pageIndex + " completed: " + pageAdded + " added, " + pageUpdated + " updated");
 
                     if (advList.size() < pageSize) {
-                        System.out.println("🎉 Reached final page! Fetch complete.");
+                        System.out.println("✅ Reached last page");
                         hasMorePages = false;
-                    } else {
-                        pageIndex++;
                     }
+                    pageIndex++;
+                    totalPages++;
 
-                    try {
-                        Thread.sleep(1000);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                    }
-                    
                 } catch (Exception e) {
                     System.err.println("❌ Error fetching Cisco page " + pageIndex + ": " + e.getMessage());
-                    pageIndex++;
+                    hasMorePages = false;
+                    break;
                 }
             }
             
         } catch (Exception e) {
             System.err.println("❌ Failed to fetch Cisco advisories: " + e.getMessage());
-            fetchCiscoDataFromNVD();
+        } finally {
+            isFetching = false;
+            currentProgress = 100;
         }
 
         long totalAfter = advisoryRepository.count();
@@ -238,27 +255,80 @@ public class ApiService {
         log.setAddedData(added);
         logRepository.save(log);
 
-        System.out.println("🎉 COMPLETE Cisco advisories fetch finished!");
-        System.out.println("📊 FINAL SUMMARY:");
-        System.out.println("   - Records before: " + totalBefore);
-        System.out.println("   - New records added: " + added);
-        System.out.println("   - Existing records updated: " + updated);
-        System.out.println("   - Advisories skipped (no CVEs): " + skippedNoCVE);
-        System.out.println("   - Records after: " + totalAfter);
-        System.out.println("   - Net change: " + (totalAfter - totalBefore));
+        System.out.println("✅ QUICK Cisco advisories fetch completed!");
+        System.out.println("📊 Summary: " + added + " added, " + updated + " updated");
+        
+        return Map.of(
+            "status", "success",
+            "message", "Quick fetch completed",
+            "added", added,
+            "updated", updated,
+            "total_before", totalBefore,
+            "total_after", totalAfter
+        );
+    }
+
+    /**
+     * Async method for complete data fetch
+     */
+    @Async
+    public CompletableFuture<Map<String, Object>> fetchAllDataAsync() {
+        System.out.println("🚀 Starting ASYNC complete data fetch...");
+        
+        Map<String, Object> result = fetchAllData();
+        
+        return CompletableFuture.completedFuture(result);
+    }
+
+    /**
+     * Manual method to force fetch all data
+     */
+    public Map<String, Object> fetchAllData() {
+        if (isFetching) {
+            return Map.of("status", "error", "message", "Fetch already in progress");
+        }
+
+        isFetching = true;
+        currentProgress = 0;
+        
+        long initialCount = advisoryRepository.count();
+        
+        System.out.println("🚀 MANUAL TRIGGER: Starting COMPLETE data fetch...");
+
+        // First do a quick Cisco fetch
+        Map<String, Object> ciscoResult = quickFetchAndStoreCiscoAdvisories(10);
+        
+        // Then do NVD fetch
+        fetchCiscoDataFromNVD();
+        
+        long finalCount = advisoryRepository.count();
+        long totalAdded = finalCount - initialCount;
+        
+        isFetching = false;
+        currentProgress = 100;
+
+        return Map.of(
+            "status", "success",
+            "message", "Complete data fetch finished",
+            "initial_records", initialCount,
+            "final_records", finalCount,
+            "total_added", totalAdded,
+            "cisco_fetch", ciscoResult,
+            "timestamp", LocalDateTime.now().toString()
+        );
     }
 
     /**
      * Fetch Cisco-related data from NVD
      */
     public void fetchCiscoDataFromNVD() {
-        System.out.println("🔄 Falling back to NVD for Cisco-related vulnerabilities...");
+        System.out.println("🔄 Fetching Cisco-related data from NVD...");
         
         int totalProcessed = 0;
         int startIndex = 0;
-        int resultsPerPage = 2000;
+        int resultsPerPage = 500; // Smaller for faster processing
         
-        while (true) {
+        while (startIndex < 2000) { // Limit to 2000 records
             try {
                 String url = "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=cisco&resultsPerPage=" + 
                            resultsPerPage + "&startIndex=" + startIndex;
@@ -291,7 +361,7 @@ public class ApiService {
                         Map<String, Object> ciscoData = new HashMap<>();
                         ciscoData.put("advisory_id", "NVD-" + cveId);
                         ciscoData.put("advisory_title", cve.path("descriptions").get(0).path("value").asText(""));
-                        ciscoData.put("source", "NVD Complete");
+                        ciscoData.put("source", "NVD");
                         
                         JsonNode metrics = cve.path("metrics");
                         String cvssScore = "N/A";
@@ -320,45 +390,13 @@ public class ApiService {
                 
                 startIndex += resultsPerPage;
                 
-                try {
-                    Thread.sleep(2000);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-                
             } catch (Exception e) {
                 System.err.println("❌ Error fetching NVD data: " + e.getMessage());
                 break;
             }
         }
         
-        System.out.println("🎉 COMPLETE NVD fetch finished! Total processed: " + totalProcessed + " CVEs");
-    }
-
-    /**
-     * Manual method to force fetch all data
-     */
-    public Map<String, Object> fetchAllData() {
-        System.out.println("🚀 MANUAL TRIGGER: Starting COMPLETE data fetch...");
-        
-        long initialCount = advisoryRepository.count();
-        
-        fetchAndStoreCiscoAdvisories();
-        
-        fetchCiscoDataFromNVD();
-        
-        long finalCount = advisoryRepository.count();
-        long totalAdded = finalCount - initialCount;
-        
-        return Map.of(
-            "status", "success",
-            "message", "Complete data fetch finished",
-            "initial_records", initialCount,
-            "final_records", finalCount,
-            "total_added", totalAdded,
-            "timestamp", LocalDateTime.now().toString()
-        );
+        System.out.println("✅ NVD fetch finished! Total processed: " + totalProcessed + " CVEs");
     }
 
     // === NVD API Methods ===
@@ -381,7 +419,7 @@ public class ApiService {
         log.setPreviousFetchTime(log.getLastFetchTime());
         log.setLastFetchTime(startTime);
 
-        String url = "https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Cisco&resultsPerPage=2000";
+        String url = "https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Cisco&resultsPerPage=100";
         try {
             System.out.println("📡 Fetching NVD summary...");
             ResponseEntity<String> response = restTemplate.getForEntity(url, String.class);
@@ -477,69 +515,21 @@ public class ApiService {
     }
 
     /**
-     * Get registration instructions
+     * Get fetch status
      */
-    public Map<String, Object> getRegistrationInstructions() {
+    public Map<String, Object> getFetchStatus() {
         return Map.of(
-            "message", "Your current credentials are working correctly!",
-            "status", "valid"
+            "is_fetching", isFetching,
+            "progress", currentProgress,
+            "total_pages", totalPages,
+            "timestamp", LocalDateTime.now().toString()
         );
     }
 
     /**
-     * Test Cisco API data
+     * Quick fetch endpoint
      */
-    public Map<String, Object> testCiscoApiData() {
-        try {
-            String token = getAccessToken();
-            String testUrl = "https://apix.cisco.com/security/advisories/v2/all?pageIndex=1&pageSize=5";
-            
-            HttpHeaders headers = new HttpHeaders();
-            headers.set("Authorization", "Bearer " + token);
-            headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
-
-            HttpEntity<String> requestEntity = new HttpEntity<>(headers);
-            ResponseEntity<String> response = restTemplate.exchange(testUrl, HttpMethod.GET, requestEntity, String.class);
-
-            if (!response.getStatusCode().is2xxSuccessful()) {
-                return Map.of(
-                    "status", "error",
-                    "message", "API call failed: HTTP " + response.getStatusCode()
-                );
-            }
-
-            JsonNode root = mapper.readTree(response.getBody());
-            JsonNode advisories = root.path("advisories");
-            
-            int advisoryCount = advisories.isArray() ? advisories.size() : 0;
-            
-            List<Map<String, Object>> sampleAdvisories = new ArrayList<>();
-            if (advisories.isArray()) {
-                for (int i = 0; i < Math.min(advisories.size(), 3); i++) {
-                    JsonNode adv = advisories.get(i);
-                    Map<String, Object> sample = new HashMap<>();
-                    sample.put("advisoryId", adv.path("advisoryId").asText());
-                    sample.put("advisoryTitle", adv.path("advisoryTitle").asText());
-                    sample.put("cvssBaseScore", adv.path("cvssBaseScore").asText());
-                    sample.put("cves", extractList(adv.path("cves")));
-                    sampleAdvisories.add(sample);
-                }
-            }
-
-            return Map.of(
-                "status", "success",
-                "message", "Cisco API is working correctly!",
-                "advisory_count", advisoryCount,
-                "sample_advisories", sampleAdvisories,
-                "total_pages", root.path("totalPages").asInt(),
-                "total_advisories", root.path("totalAdvisories").asInt()
-            );
-
-        } catch (Exception e) {
-            return Map.of(
-                "status", "error",
-                "message", "Cisco API test failed: " + e.getMessage()
-            );
-        }
+    public Map<String, Object> quickFetch(int pages) {
+        return quickFetchAndStoreCiscoAdvisories(pages);
     }
 }
