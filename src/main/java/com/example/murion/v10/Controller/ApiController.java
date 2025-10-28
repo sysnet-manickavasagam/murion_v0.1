@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 @RestController
 @RequestMapping("/api")
@@ -23,16 +24,18 @@ public class ApiController {
         this.apiService = apiService;
     }
 
-    // === Cisco API Endpoints ===
+    // === Quick Fetch Endpoints (Render-compatible) ===
+
+    @GetMapping("/fetch/quick")
+    public Map<String, Object> quickFetch(@RequestParam(defaultValue = "5") int pages) {
+        return apiService.quickFetch(pages);
+    }
 
     @GetMapping("/fetch/cisco")
     public ResponseEntity<Map<String, Object>> fetchCiscoData() {
         try {
-            apiService.fetchAndStoreCiscoAdvisories();
-            return ResponseEntity.ok(Map.of(
-                "status", "success", 
-                "message", "Cisco advisories fetch triggered successfully"
-            ));
+            Map<String, Object> result = apiService.quickFetchAndStoreCiscoAdvisories(5);
+            return ResponseEntity.ok(result);
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(
                 "status", "error", 
@@ -47,7 +50,7 @@ public class ApiController {
             apiService.fetchCiscoDataFromNVD();
             return ResponseEntity.ok(Map.of(
                 "status", "success", 
-                "message", "Cisco data fetch from NVD fallback triggered successfully"
+                "message", "Cisco data fetch from NVD triggered successfully"
             ));
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(
@@ -57,9 +60,23 @@ public class ApiController {
         }
     }
 
+    // === Async Endpoints (for complete fetch) ===
+
     @GetMapping("/fetch/all")
     public Map<String, Object> fetchAllData() {
         return apiService.fetchAllData();
+    }
+
+    @GetMapping("/fetch/async")
+    public CompletableFuture<Map<String, Object>> fetchAllDataAsync() {
+        return apiService.fetchAllDataAsync();
+    }
+
+    // === Status Endpoints ===
+
+    @GetMapping("/fetch/status")
+    public Map<String, Object> getFetchStatus() {
+        return apiService.getFetchStatus();
     }
 
     // === Diagnostic Endpoints ===
@@ -69,21 +86,11 @@ public class ApiController {
         return apiService.testCiscoCredentials();
     }
 
-    @GetMapping("/test/cisco-api")
-    public Map<String, Object> testCiscoApi() {
-        return apiService.testCiscoApiData();
-    }
+    // === Stats Endpoints ===
 
-    @GetMapping("/cisco-registration-help")
-    public Map<String, Object> getRegistrationHelp() {
-        return apiService.getRegistrationInstructions();
-    }
-
-    // === NVD API Endpoints ===
-
-    @GetMapping("/nvd/cisco")
-    public Map<String, Object> getNVDData() {
-        return apiService.fetchNVDData();
+    @GetMapping("/stats/database")
+    public Map<String, Object> getDatabaseStats() {
+        return apiService.getDatabaseStats();
     }
 
     // === Log Endpoints ===
@@ -98,13 +105,6 @@ public class ApiController {
         return logRepository.findByVendorName(vendor)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
-    }
-
-    // === Stats Endpoints ===
-
-    @GetMapping("/stats/database")
-    public Map<String, Object> getDatabaseStats() {
-        return apiService.getDatabaseStats();
     }
 
     // === Backward Compatibility ===
