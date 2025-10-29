@@ -8,7 +8,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.*;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -50,10 +49,8 @@ public class ApiService {
     }
 
     private RestTemplate createRestTemplate() {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(60000); // Increased timeout for full fetch
-        factory.setReadTimeout(60000);
-        return new RestTemplate(factory);
+        // No timeout settings - requests will wait indefinitely
+        return new RestTemplate();
     }
 
     // === Cisco OAuth2 Token Methods ===
@@ -149,7 +146,7 @@ public class ApiService {
             
             String baseUrl = "https://apix.cisco.com/security/advisories/v2/all";
             int pageIndex = 1;
-            int pageSize = 100; // Larger page size to reduce API calls
+            int pageSize = 100;
             boolean hasMorePages = true;
             totalPages = 0;
 
@@ -250,7 +247,7 @@ public class ApiService {
                     System.out.println("✅ Page " + pageIndex + " completed: " + pageAdded + " added, " + pageUpdated + " updated, " + pageSkipped + " skipped");
 
                     // Update progress (estimate based on reasonable maximum)
-                    currentProgress = Math.min(95, (pageIndex * 100) / 200); // Assume max 200 pages
+                    currentProgress = Math.min(95, (pageIndex * 100) / 200);
 
                     if (advList.size() < pageSize) {
                         System.out.println("✅ Reached last page (fewer results than page size)");
@@ -271,7 +268,7 @@ public class ApiService {
                     System.err.println("❌ Error fetching Cisco page " + pageIndex + ": " + e.getMessage());
                     // Continue to next page instead of breaking completely
                     pageIndex++;
-                    if (pageIndex > 50) { // Safety limit to prevent infinite loops
+                    if (pageIndex > 50) {
                         System.err.println("❌ Safety limit reached (50 pages with errors), stopping fetch");
                         break;
                     }
@@ -515,8 +512,6 @@ public class ApiService {
             "timestamp", LocalDateTime.now().toString()
         );
     }
-
-    // ... [Rest of the methods remain the same: fetchCiscoDataFromNVD, fetchNVDData, buildCiscoData, extractList, etc.]
 
     /**
      * Fetch Cisco-related data from NVD
