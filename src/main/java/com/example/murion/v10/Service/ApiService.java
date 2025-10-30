@@ -80,7 +80,7 @@ public class ApiService {
 
             JsonNode tokenResponse = mapper.readTree(response.getBody());
             accessToken = tokenResponse.path("access_token").asText(null);
-            int expiresIn = tokenResponse.path("expires_in").asInt(3600);
+            int expiresIn = tokenResponse.path("expires_in").asInt(7200);
             tokenExpiry = LocalDateTime.now().plusSeconds(Math.max(expiresIn - 60, 30));
 
             if (accessToken == null || accessToken.isEmpty()) {
@@ -99,7 +99,7 @@ public class ApiService {
     /**
      * Complete fetch of ALL Cisco advisories without page limits
      */
-    @Scheduled(cron = "0 0 */6 * * *")
+    @Scheduled(cron = "0 0 */2 * * *")
     public void scheduledCompleteFetch() {
         if (isFetching) {
             System.out.println("⚠️ Fetch already in progress, skipping scheduled run");
@@ -734,3 +734,4 @@ public class ApiService {
         return fetchAllCiscoAdvisories();
     }
 }
+
