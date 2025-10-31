@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.http.*;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.scheduling.annotation.Async;
@@ -16,7 +17,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
-
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -51,6 +53,13 @@ public class ApiService {
         this.restTemplate = restTemplate;
     }
 
+
+
+    @EventListener(ApplicationReadyEvent.class)
+    public void onAppStart() {
+        System.out.println("🚀 Application Ready → Fetching Cisco Data...");
+        fetchAndStoreCiscoAdvisories();
+    }
 
     private RestTemplate createRestTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -100,7 +109,7 @@ public class ApiService {
         }
     }
     // Fetch Cisco advisories
-    @Scheduled(cron = "0 0 */1.10 * * *")
+    @Scheduled(cron = "0 0 */2 * * *")
     public void fetchAndStoreCiscoAdvisories() {
         String vendor = "Cisco";
         LocalDateTime startTime = LocalDateTime.now();
@@ -239,11 +248,6 @@ public class ApiService {
             e.printStackTrace();
             return Map.of("error", e.getMessage());
         }
-    }
-    @PostConstruct
-    public void init() {
-        System.out.println("🚀 Application Started → Fetching Cisco Data...");
-        fetchAndStoreCiscoAdvisories();
     }
 
 }
