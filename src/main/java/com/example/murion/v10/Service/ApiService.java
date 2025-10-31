@@ -61,6 +61,7 @@ public class ApiService {
         fetchAndStoreCiscoAdvisories();
     }
 
+
     private RestTemplate createRestTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(30000);
@@ -130,9 +131,6 @@ public class ApiService {
 
         while (true) {
             try {
-                // ✅ Ensure token still valid before calling
-                token = getAccessToken();
-
                 String url = baseUrl + "?pageIndex=" + pageIndex + "&pageSize=" + pageSize;
                 HttpHeaders headers = new HttpHeaders();
                 headers.set("Authorization", "Bearer " + token);
@@ -140,19 +138,6 @@ public class ApiService {
                 HttpEntity<String> requestEntity = new HttpEntity<>(headers);
 
                 ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, requestEntity, String.class);
-
-                // ✅ If unauthorized → token expired → refresh + retry once
-                if (response.getStatusCode() == HttpStatus.UNAUTHORIZED || response.getStatusCode() == HttpStatus.FORBIDDEN) {
-                    System.out.println("⚠️ Token expired during fetch... Refreshing...");
-                    accessToken = null;   // force refresh
-                    token = getAccessToken();
-
-                    headers.set("Authorization", "Bearer " + token);
-                    requestEntity = new HttpEntity<>(headers);
-
-                    response = restTemplate.exchange(url, HttpMethod.GET, requestEntity, String.class);
-                }
-
                 JsonNode root = mapper.readTree(response.getBody());
                 JsonNode advList = root.path("advisories");
 
@@ -167,7 +152,6 @@ public class ApiService {
                 break;
             }
         }
-
 
         for (JsonNode adv : advisories) {
             try {
@@ -237,32 +221,15 @@ public class ApiService {
 
     private JsonNode fetchCsafData(String url) {
         try {
-            String token = getAccessToken();
             HttpHeaders headers = new HttpHeaders();
-            headers.set("Authorization", "Bearer " + token);
             headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
-
-            HttpEntity<String> req = new HttpEntity<>(headers);
-            ResponseEntity<String> res = restTemplate.exchange(url, HttpMethod.GET, req, String.class);
-
-            if (res.getStatusCode() == HttpStatus.UNAUTHORIZED || res.getStatusCode() == HttpStatus.FORBIDDEN) {
-                System.out.println("⚠️ Token expired during CSAF... Refreshing...");
-                accessToken = null;
-                token = getAccessToken();
-                headers.set("Authorization", "Bearer " + token);
-                req = new HttpEntity<>(headers);
-
-                res = restTemplate.exchange(url, HttpMethod.GET, req, String.class);
-            }
-
-            return mapper.readTree(res.getBody());
-
+            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(headers), String.class);
+            return mapper.readTree(response.getBody());
         } catch (Exception e) {
-            System.err.println("⚠️ CSAF fetch failed: " + e.getMessage());
+            System.err.println("⚠️ CSAF fetch failed for " + url + ": " + e.getMessage());
             return mapper.createObjectNode();
         }
     }
-
 
     // === NVD Data Fetch ===
     public Map<String, Object> fetchNVDData() {
