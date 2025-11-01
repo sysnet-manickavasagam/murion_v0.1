@@ -126,7 +126,7 @@ public class ApiService {
         String baseUrl = "https://apix.cisco.com/security/advisories/v2/all";
 
         int pageIndex = 1;
-        int pageSize = 1000;   // ✅ fewer pages → less rate-limit issues
+        int pageSize = 100;   // ✅ fewer pages → less rate-limit issues
         List<JsonNode> advisories = new ArrayList<>();
 
         System.out.println("📡 Fetching Cisco advisories...");
@@ -297,3 +297,4 @@ public class ApiService {
         }
     }
     }
+
