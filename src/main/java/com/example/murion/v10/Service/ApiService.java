@@ -9,20 +9,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.http.*;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
-import org.springframework.context.event.EventListener;
+
 import java.time.LocalDateTime;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.stream.Collectors;
 
 @Service
 public class ApiService {
@@ -44,23 +41,16 @@ public class ApiService {
     private String accessToken;
     private LocalDateTime tokenExpiry;
 
-    private volatile boolean isFetching = false;
-    private volatile int currentProgress = 0;
-    private volatile int totalPages = 0;
-
     @Autowired
     public ApiService(RestTemplate restTemplate) {
         this.restTemplate = restTemplate;
     }
-
-
 
     @EventListener(ApplicationReadyEvent.class)
     public void onAppStart() {
         System.out.println("🚀 Application Ready → Fetching Cisco Data...");
         fetchAndStoreCiscoAdvisories();
     }
-
 
     private RestTemplate createRestTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -69,9 +59,11 @@ public class ApiService {
         return new RestTemplate(factory);
     }
 
-    // === Cisco OAuth2 Token Methods ===
-
+    // ======================================================
+    // ✅ TOKEN
+    // ======================================================
     private String getAccessToken() {
+
         if (accessToken != null && tokenExpiry != null && LocalDateTime.now().isBefore(tokenExpiry)) {
             return accessToken;
         }
@@ -109,14 +101,22 @@ public class ApiService {
             throw new RuntimeException("Failed to obtain Cisco OAuth2 token: " + e.getMessage(), e);
         }
     }
-    // Fetch Cisco advisories
+
+    // ======================================================
+    // ✅ MAIN FETCH
+    // ======================================================
     @Scheduled(cron = "0 0 */2 * * *")
     public void fetchAndStoreCiscoAdvisories() {
+
         String vendor = "Cisco";
         LocalDateTime startTime = LocalDateTime.now();
 
         VendorFetchLog log = logRepository.findByVendorName(vendor)
-                .orElseGet(() -> { VendorFetchLog v = new VendorFetchLog(); v.setVendorName(vendor); return v; });
+                .orElseGet(() -> {
+                    VendorFetchLog v = new VendorFetchLog();
+                    v.setVendorName(vendor);
+                    return v;
+                });
 
         log.setPreviousFetchTime(log.getLastFetchTime());
         log.setLastFetchTime(startTime);
@@ -124,7 +124,9 @@ public class ApiService {
         int added = 0;
         String token = getAccessToken();
         String baseUrl = "https://apix.cisco.com/security/advisories/v2/all";
-        int pageIndex = 1, pageSize = 100;
+
+        int pageIndex = 1;
+        int pageSize = 1000;   // ✅ fewer pages → less rate-limit issues
         List<JsonNode> advisories = new ArrayList<>();
 
         System.out.println("📡 Fetching Cisco advisories...");
@@ -132,20 +134,28 @@ public class ApiService {
         while (true) {
             try {
                 String url = baseUrl + "?pageIndex=" + pageIndex + "&pageSize=" + pageSize;
+
                 HttpHeaders headers = new HttpHeaders();
                 headers.set("Authorization", "Bearer " + token);
                 headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
+
                 HttpEntity<String> requestEntity = new HttpEntity<>(headers);
 
-                ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, requestEntity, String.class);
+                ResponseEntity<String> response = safeCiscoRequest(url, requestEntity);
+
                 JsonNode root = mapper.readTree(response.getBody());
                 JsonNode advList = root.path("advisories");
 
                 if (!advList.isArray() || advList.isEmpty()) break;
 
                 advList.forEach(advisories::add);
+
                 if (advList.size() < pageSize) break;
+
                 pageIndex++;
+
+                // ✅ Cisco rate–limit (30/min → wait 2.2 sec)
+                Thread.sleep(2200);
 
             } catch (Exception e) {
                 System.err.println("❌ Error fetching Cisco page " + pageIndex + ": " + e.getMessage());
@@ -153,6 +163,7 @@ public class ApiService {
             }
         }
 
+        // ✅ SAVE TO DB
         for (JsonNode adv : advisories) {
             try {
                 String advisoryId = adv.path("advisoryId").asText(null);
@@ -166,13 +177,17 @@ public class ApiService {
                 List<String> cwes = extractList(adv.path("cwe"));
                 List<String> products = extractList(adv.path("productNames"));
 
-                String csafUrl = "https://sec.cloudapps.cisco.com/security/center/contentjson/CiscoSecurityAdvisory/"
-                        + advisoryId + "/csaf/" + advisoryId + ".json";
+                String csafUrl =
+                        "https://sec.cloudapps.cisco.com/security/center/contentjson/CiscoSecurityAdvisory/"
+                                + advisoryId + "/csaf/" + advisoryId + ".json";
+
                 JsonNode csafData = fetchCsafData(csafUrl);
                 if (csafData == null || csafData.isEmpty()) continue;
 
                 for (String cveId : cveIds) {
-                    CiscoAdvisory record = advisoryRepository.findById(cveId).orElse(new CiscoAdvisory());
+                    CiscoAdvisory record = advisoryRepository.findById(cveId)
+                            .orElse(new CiscoAdvisory());
+
                     record.setCveId(cveId);
                     record.setCisco_data(mapper.valueToTree(ciscoData));
                     record.setBug_id(mapper.valueToTree(bugIds));
@@ -195,6 +210,35 @@ public class ApiService {
         System.out.println("✅ Cisco advisories updated. Added: " + added);
     }
 
+    // ======================================================
+    // ✅ SAFE CALL (429 retry)
+    // ======================================================
+    private ResponseEntity<String> safeCiscoRequest(String url, HttpEntity<String> entity) {
+
+        int retries = 3;
+        long delay = 5000; // 5 sec
+
+        for (int i = 0; i < retries; i++) {
+            try {
+                return restTemplate.exchange(url, HttpMethod.GET, entity, String.class);
+            }
+            catch (Exception ex) {
+
+                if (ex.getMessage().contains("429")) {
+                    System.out.println("⚠️ Rate limit hit → waiting " + delay + "ms...");
+                    try { Thread.sleep(delay); } catch (InterruptedException ignored) {}
+                    delay *= 2;
+                } else {
+                    throw ex;
+                }
+            }
+        }
+        throw new RuntimeException("Failed after retrying 429/other failures");
+    }
+
+    // ======================================================
+    // ✅ HELPER
+    // ======================================================
     private Map<String, Object> buildCiscoData(JsonNode adv) {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("advisory_id", adv.path("advisoryId").asText(""));
@@ -231,7 +275,9 @@ public class ApiService {
         }
     }
 
-    // === NVD Data Fetch ===
+    // ======================================================
+    // ✅ NVD SAMPLE
+    // ======================================================
     public Map<String, Object> fetchNVDData() {
         String url = "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=Cisco&resultsPerPage=1000";
         try {
@@ -250,5 +296,4 @@ public class ApiService {
             return Map.of("error", e.getMessage());
         }
     }
-
-}
+    }
