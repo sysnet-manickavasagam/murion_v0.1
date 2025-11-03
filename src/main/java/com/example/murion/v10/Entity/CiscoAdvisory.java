@@ -38,4 +38,13 @@ public class CiscoAdvisory {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "jsonb")
     private JsonNode csaf;
+
+
+    @PrePersist
+    @PreUpdate
+    public void setProductNameFromJson() {
+        if (productnames != null && productnames.isArray() && productnames.size() > 0) {
+            this.productnames = productnames.get(0);
+        }
+    }
 }

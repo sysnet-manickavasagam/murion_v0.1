@@ -20,6 +20,8 @@ import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 public class ApiService {
@@ -45,12 +47,12 @@ public class ApiService {
     public ApiService(RestTemplate restTemplate) {
         this.restTemplate = restTemplate;
     }
-
-    @EventListener(ApplicationReadyEvent.class)
-    public void onAppStart() {
-        System.out.println("🚀 Application Ready → Fetching Cisco Data...");
-        fetchAndStoreCiscoAdvisories();
-    }
+//
+//    @EventListener(ApplicationReadyEvent.class)
+//    public void onAppStart() {
+//        System.out.println("🚀 Application Ready → Fetching Cisco Data...");
+//        fetchAndStoreCiscoAdvisories();
+//    }
 
     private RestTemplate createRestTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -296,5 +298,403 @@ public class ApiService {
             return Map.of("error", e.getMessage());
         }
     }
+
+    public Map<String, Object> checkProductVersion(String vendor, String product, String version) {
+        Map<String, Object> result = new HashMap<>();
+
+        List<CiscoAdvisory> list = advisoryRepository.searchByProduct(product);
+        if (list.isEmpty()) {
+            result.put("status", "NOT_FOUND");
+            result.put("message", "Product not found in advisory database");
+            return result;
+        }
+
+        boolean foundAdvisory = false;
+
+        for (CiscoAdvisory adv : list) {
+            JsonNode notes = adv.getCsaf().path("document").path("notes");
+
+            JsonNode fixedSection = null;
+            if (notes.isArray()) {
+                for (JsonNode n : notes) {
+                    if (n.path("category").asText("").equalsIgnoreCase("general") &&
+                            n.path("title").asText("").equalsIgnoreCase("Fixed Software")) {
+                        fixedSection = n;
+                        break;
+                    }
+                }
+            }
+
+            if (fixedSection == null) continue;
+
+            String rawText = fixedSection.path("text").asText("");
+            System.out.println("📄 Raw Fixed Software text:");
+            System.out.println(rawText);
+
+            Map<String, String> fixedVersions = extractFixedVersions(rawText);
+            System.out.println("📊 Parsed fixed versions: " + fixedVersions);
+
+            if (fixedVersions.isEmpty()) continue;
+
+            foundAdvisory = true;
+            String fix = getFixForVersion(fixedVersions, version);
+
+            // If the fix is MIGRATE, suggest the best available fix version
+            if ("MIGRATE".equals(fix)) {
+                String suggestedFix = suggestBestFixVersion(fixedVersions, version);
+                if (!"MIGRATE".equals(suggestedFix)) {
+                    result.put("status", "AFFECTED");
+                    result.put("fix_version", suggestedFix);
+                    result.put("advisory_id", adv.getCisco_data().path("advisory_id").asText());
+                    result.put("note", "Original advisory suggests migration, but " + suggestedFix + " is the earliest available fixed version");
+                    return result;
+                }
+            }
+
+            if (fix != null) {
+                result.put("status", "AFFECTED");
+                result.put("fix_version", fix);
+                result.put("advisory_id", adv.getCisco_data().path("advisory_id").asText());
+                return result;
+            }
+        }
+
+        if (foundAdvisory) {
+            result.put("status", "NOT_AFFECTED");
+        } else {
+            result.put("status", "NO_ADVISORY_DATA");
+            result.put("message", "No fixed software information found in advisories");
+        }
+
+        return result;
     }
+    private Map<String, String> extractFixedVersions(String text) {
+        Map<String, String> map = new HashMap<>();
+
+        if (text == null || text.isEmpty()) {
+            return map;
+        }
+
+        // Clean and normalize the text
+        text = text.replaceAll("\\r\\n", "\n").trim();
+
+        // Look for version-fix pairs in the text
+        String[] lines = text.split("\n");
+
+        for (String line : lines) {
+            line = line.trim();
+
+            // Skip header lines and very long lines
+            if (line.contains("First Fixed Release") ||
+                    line.contains("Fixed Release") ||
+                    line.contains("Release") && line.contains("Fixed") ||
+                    line.length() > 200) {
+                continue;
+            }
+
+            // Pattern for version and fix pairs
+            // Matches: "23.0  Migrate to a fixed release." or "24.0  24.0.2025.05"
+            Pattern pattern = Pattern.compile("^(\\d+(?:\\.\\d+)*|Earlier\\s+than\\s+[\\w\\.]+)\\s+(Migrate(?:\\.)?|([\\w\\.]+(?:\\.[\\w\\.]+)*))", Pattern.CASE_INSENSITIVE);
+            Matcher matcher = pattern.matcher(line);
+
+            if (matcher.find()) {
+                String version = matcher.group(1).trim();
+                String fix = matcher.group(2).trim();
+
+                // Handle "Earlier than X" cases
+                if (version.toLowerCase().startsWith("earlier than")) {
+                    version = "earlier";
+                }
+
+                if (fix.toLowerCase().contains("migrate")) {
+                    map.put(version, "MIGRATE");
+                } else {
+                    // Clean the fix version - take only the version part before any spaces
+                    String cleanFix = fix.split("\\s+")[0];
+                    map.put(version, cleanFix);
+                }
+                System.out.println("📝 Parsed: " + version + " -> " + map.get(version));
+            }
+
+            // Also try to match simple version-version pairs without "Migrate"
+            Pattern simplePattern = Pattern.compile("^(\\d+(?:\\.\\d+)+)\\s+(\\d+(?:\\.\\d+)+(?:\\.[\\w\\.]+)*)");
+            Matcher simpleMatcher = simplePattern.matcher(line);
+            if (simpleMatcher.find()) {
+                String version = simpleMatcher.group(1).trim();
+                String fix = simpleMatcher.group(2).trim();
+                map.put(version, fix);
+                System.out.println("📝 Simple parsed: " + version + " -> " + fix);
+            }
+        }
+
+        return map;
+    }
+
+    private Map<String, String> parseStructuredTable(String text) {
+        Map<String, String> map = new HashMap<>();
+
+        // Split into lines and look for table structure
+        String[] lines = text.split("\n");
+        List<String> tableLines = new ArrayList<>();
+        boolean inTable = false;
+
+        for (String line : lines) {
+            line = line.trim();
+
+            // Detect table start
+            if (line.matches(".*(First Fixed Release|Fixed Release|Fixed Version).*") ||
+                    line.matches(".*Release.*Fixed.*") ||
+                    (line.contains("Migrate") && line.length() < 100) ||
+                    (line.matches(".*\\d+.*") && line.matches(".*(Migrate|\\d+\\.\\d+).*") && line.length() < 150)) {
+                inTable = true;
+            }
+
+            // Detect table end
+            if (line.contains("Cisco Product Security") ||
+                    line.contains("PSIRT validates") ||
+                    line.contains("https://") ||
+                    line.length() > 200) {
+                inTable = false;
+            }
+
+            if (inTable && !line.isEmpty()) {
+                tableLines.add(line);
+            }
+        }
+
+        // Parse table lines
+        for (String line : tableLines) {
+            // Remove multiple spaces and clean the line
+            line = line.replaceAll("\\s+", " ").trim();
+
+            // Pattern for: "11 11.32.2.1" or "9 Migrate to a fixed release"
+            Pattern pattern = Pattern.compile("^(\\d+(?:\\.\\d+)*|Earlier(?:\\s+than\\s+\\d+(?:\\.\\d+)*)?)\\s+(Migrate(?:\\s+to\\s+a\\s+fixed\\s+release)?|\\(?\\d+(?:\\.\\d+)+\\)?[^\\s]*)(?:\\s|$)");
+            Matcher matcher = pattern.matcher(line);
+
+            if (matcher.find()) {
+                String version = matcher.group(1).trim();
+                String fixed = matcher.group(2).trim();
+
+                if (fixed.toLowerCase().contains("migrate")) {
+                    map.put(version, "MIGRATE");
+                } else {
+                    // Clean up the fixed version - remove parentheses and extra text
+                    String cleanFixed = fixed.replaceAll("[\\(\\)]", "").split("\\s+")[0];
+                    map.put(version, cleanFixed);
+                }
+            }
+
+            // Also try to match common Cisco table formats with multiple columns
+            String[] parts = line.split("\\s{2,}|\\t");
+            if (parts.length >= 2) {
+                String version = parts[0].trim();
+                String fixed = parts[1].trim();
+
+                if (isValidVersion(version) && (isValidVersion(fixed) || fixed.toLowerCase().contains("migrate"))) {
+                    if (fixed.toLowerCase().contains("migrate")) {
+                        map.put(version, "MIGRATE");
+                    } else {
+                        map.put(version, fixed.split("\\s+")[0]);
+                    }
+                }
+            }
+        }
+
+        return map;
+    }
+
+    private Map<String, String> parseSimpleVersionPairs(String text) {
+        Map<String, String> map = new HashMap<>();
+
+        // Pattern for simple version-fix pairs
+        Pattern pattern = Pattern.compile("(\\d+(?:\\.\\d+)*|Earlier)\\s+([A-Z][a-z]+\\s+[^\\s]+|\\d+(?:\\.\\d+)+[^\\s]*|Migrate[^\\s]*)");
+        Matcher matcher = pattern.matcher(text);
+
+        while (matcher.find()) {
+            String version = matcher.group(1).trim();
+            String fixed = matcher.group(2).trim();
+
+            if (fixed.toLowerCase().contains("migrate")) {
+                map.put(version, "MIGRATE");
+            } else {
+                // Extract just the version part
+                String cleanFixed = extractVersionNumber(fixed);
+                if (cleanFixed != null) {
+                    map.put(version, cleanFixed);
+                }
+            }
+        }
+
+        return map;
+    }
+
+    private Map<String, String> parseCiscoPatterns(String text) {
+        Map<String, String> map = new HashMap<>();
+
+        // Common Cisco patterns
+        String[] patterns = {
+                "(\\d+(?:\\.\\d+)*)\\s+(\\d+(?:\\.\\d+)+(?:SR\\d+)?(?:[^\\s.]*))",
+                "Earlier than (\\d+(?:\\.\\d+)*)\\s+Migrate",
+                "(\\d+(?:\\.\\d+)*\\.?\\d*)\\s+(\\d+(?:\\.\\d+)+(?:[^\\s.]*))"
+        };
+
+        for (String patternStr : patterns) {
+            Pattern pattern = Pattern.compile(patternStr);
+            Matcher matcher = pattern.matcher(text);
+
+            while (matcher.find()) {
+                if (matcher.groupCount() >= 2) {
+                    String version = matcher.group(1).trim();
+                    String fixed = matcher.group(2).trim();
+
+                    if (fixed.toLowerCase().contains("migrate")) {
+                        map.put(version, "MIGRATE");
+                    } else {
+                        String cleanFixed = extractVersionNumber(fixed);
+                        if (cleanFixed != null) {
+                            map.put(version, cleanFixed);
+                        }
+                    }
+                }
+            }
+        }
+
+        return map;
+    }
+
+    private boolean isValidVersion(String version) {
+        return version != null &&
+                (version.matches("\\d+(\\.\\d+)*") ||
+                        version.equalsIgnoreCase("earlier") ||
+                        version.toLowerCase().contains("migrate"));
+    }
+
+    private String extractVersionNumber(String text) {
+        if (text == null) return null;
+
+        // Look for version patterns like: 11.32.2.1, 3.3(1), 14.3(1)SR2, etc.
+        Pattern pattern = Pattern.compile("(\\d+(?:\\.\\d+)+(?:\\(\\d+\\))?(?:SR\\d+)?(?:[^\\s.]*))");
+        Matcher matcher = pattern.matcher(text);
+
+        if (matcher.find()) {
+            return matcher.group(1).trim();
+        }
+
+        return null;
+    }
+
+    private String getFixForVersion(Map<String, String> table, String version) {
+        System.out.println("🔍 Checking version: " + version + " against table: " + table);
+
+        // Direct match
+        if (table.containsKey(version)) {
+            String fix = table.get(version);
+            System.out.println("✅ Direct match found: " + fix);
+            return fix;
+        }
+
+        List<Integer> current = normalize(version);
+        List<String> allKeys = new ArrayList<>(table.keySet());
+
+        // Sort all versions in ascending order
+        allKeys.sort((a, b) -> compareVersion(normalize(a), normalize(b)));
+
+        System.out.println("📊 All sorted versions: " + allKeys);
+
+        // Find the position of our current version in the sorted list
+        int currentIndex = -1;
+        for (int i = 0; i < allKeys.size(); i++) {
+            List<Integer> candidate = normalize(allKeys.get(i));
+            if (compareVersion(current, candidate) == 0) {
+                currentIndex = i;
+                break;
+            } else if (compareVersion(current, candidate) < 0) {
+                // Current version is between previous and this one
+                currentIndex = i - 1;
+                break;
+            }
+        }
+
+        // If we didn't find a position, current version is after all listed versions
+        if (currentIndex == -1) {
+            currentIndex = allKeys.size() - 1;
+        }
+
+        System.out.println("📍 Current version position index: " + currentIndex);
+
+        // Look for the next available FIXED version (not MIGRATE)
+        for (int i = currentIndex; i < allKeys.size(); i++) {
+            String key = allKeys.get(i);
+            String fix = table.get(key);
+
+            if (!"MIGRATE".equals(fix)) {
+                System.out.println("✅ Found actual fix version: " + fix + " for key: " + key);
+                return fix;
+            }
+        }
+
+        // If no fixed version found, return MIGRATE from current position
+        String currentKey = currentIndex >= 0 && currentIndex < allKeys.size() ? allKeys.get(currentIndex) : null;
+        if (currentKey != null && table.containsKey(currentKey)) {
+            String migrateFix = table.get(currentKey);
+            System.out.println("⚠️ No specific fix found, returning: " + migrateFix);
+            return migrateFix;
+        }
+
+        // Final fallback
+        System.out.println("❌ No fix version found");
+        return "MIGRATE";
+    }
+    // ✅ UPDATED — Version normalization
+    private List<Integer> normalize(String v) {
+        List<Integer> list = new ArrayList<>();
+        for (String part : v.split("[^0-9]+")) {
+            if (!part.isBlank()) {
+                try {
+                    list.add(Integer.parseInt(part));
+                } catch (NumberFormatException ignored) {}
+            }
+        }
+        return list;
+    }
+
+    // Enhanced version comparison that handles more cases
+    private int compareVersion(List<Integer> v1, List<Integer> v2) {
+        int len = Math.max(v1.size(), v2.size());
+
+        for (int i = 0; i < len; i++) {
+            int a = (i < v1.size()) ? v1.get(i) : 0;
+            int b = (i < v2.size()) ? v2.get(i) : 0;
+
+            if (a != b) {
+                return Integer.compare(a, b);
+            }
+        }
+        return 0;
+    }
+
+
+
+    private String suggestBestFixVersion(Map<String, String> table, String currentVersion) {
+        System.out.println("💡 Looking for best available fix for: " + currentVersion);
+
+        List<String> availableFixes = new ArrayList<>();
+        for (Map.Entry<String, String> entry : table.entrySet()) {
+            if (!"MIGRATE".equals(entry.getValue()) && !entry.getKey().equals("earlier")) {
+                availableFixes.add(entry.getValue());
+            }
+        }
+
+        if (!availableFixes.isEmpty()) {
+            // Sort available fixes and return the lowest one
+            availableFixes.sort((a, b) -> compareVersion(normalize(a), normalize(b)));
+            String bestFix = availableFixes.get(0);
+            System.out.println("💡 Suggested best available fix: " + bestFix);
+            return bestFix;
+        }
+
+        return "MIGRATE";
+    }
+
+}
 

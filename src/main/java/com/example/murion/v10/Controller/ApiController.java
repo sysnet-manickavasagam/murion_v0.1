@@ -48,4 +48,15 @@ public class ApiController {
         return apiService.fetchNVDData(); // currently calls NVD
     }
 
+
+    @PostMapping("/checkVersion")
+    public ResponseEntity<?> check(
+            @RequestParam String vendor,
+            @RequestParam String product,
+            @RequestParam String version) {
+
+        return ResponseEntity.ok(apiService.checkProductVersion(vendor, product, version));
+    }
+
+
 }
