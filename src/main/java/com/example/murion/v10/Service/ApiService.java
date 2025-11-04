@@ -16,6 +16,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDateTime;
@@ -47,12 +48,12 @@ public class ApiService {
     public ApiService(RestTemplate restTemplate) {
         this.restTemplate = restTemplate;
     }
-//
-//    @EventListener(ApplicationReadyEvent.class)
-//    public void onAppStart() {
-//        System.out.println("🚀 Application Ready → Fetching Cisco Data...");
-//        fetchAndStoreCiscoAdvisories();
-//    }
+
+    @EventListener(ApplicationReadyEvent.class)
+    public void onAppStart() {
+        System.out.println("Application Ready → Fetching Cisco Data...");
+        fetchAndStoreCiscoAdvisories();
+    }
 
     private RestTemplate createRestTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -61,9 +62,7 @@ public class ApiService {
         return new RestTemplate(factory);
     }
 
-    // ======================================================
-    // ✅ TOKEN
-    // ======================================================
+
     private String getAccessToken() {
 
         if (accessToken != null && tokenExpiry != null && LocalDateTime.now().isBefore(tokenExpiry)) {
@@ -81,7 +80,7 @@ public class ApiService {
 
             HttpEntity<MultiValueMap<String, String>> requestEntity = new HttpEntity<>(body, headers);
 
-            System.out.println("🔑 Requesting Cisco OAuth2 token...");
+            System.out.println("Requesting Cisco OAuth2 token...");
             ResponseEntity<String> response = restTemplate.postForEntity(TOKEN_URL, requestEntity, String.class);
 
             if (!response.getStatusCode().is2xxSuccessful()) {
@@ -97,150 +96,233 @@ public class ApiService {
                 throw new RuntimeException("Token response missing access_token");
             }
 
-            System.out.println("✅ New Cisco access token obtained (expires in " + expiresIn + "s)");
+            System.out.println("New Cisco access token obtained (expires in " + expiresIn + "s)");
             return accessToken;
         } catch (Exception e) {
             throw new RuntimeException("Failed to obtain Cisco OAuth2 token: " + e.getMessage(), e);
         }
     }
 
-    // ======================================================
-    // ✅ MAIN FETCH
-    // ======================================================
-    @Scheduled(cron = "0 0 */2 * * *")
+
+    @Scheduled(cron = "0 0 */3 * * *")
     public void fetchAndStoreCiscoAdvisories() {
 
         String vendor = "Cisco";
         LocalDateTime startTime = LocalDateTime.now();
 
-        VendorFetchLog log = logRepository.findByVendorName(vendor)
-                .orElseGet(() -> {
-                    VendorFetchLog v = new VendorFetchLog();
-                    v.setVendorName(vendor);
-                    return v;
-                });
+        int totalAdded = 0;
+        int updatedThisYear = 0;
+        int yearTotalCount = 0;
 
-        log.setPreviousFetchTime(log.getLastFetchTime());
-        log.setLastFetchTime(startTime);
 
-        int added = 0;
-        String token = getAccessToken();
-        String baseUrl = "https://apix.cisco.com/security/advisories/v2/all";
+        for (int year = 2025; year >= 2001; year--) {
 
-        int pageIndex = 1;
-        int pageSize = 100;   // ✅ fewer pages → less rate-limit issues
-        List<JsonNode> advisories = new ArrayList<>();
+            final int y = year;
 
-        System.out.println("📡 Fetching Cisco advisories...");
+            VendorFetchLog log = logRepository.findByVendorNameAndYear(vendor, year)
+                    .orElseGet(() -> {
+                        VendorFetchLog v = new VendorFetchLog();
+                        v.setVendorName(vendor);
+                        v.setYear(y);
+                        return v;
+                    });
 
-        while (true) {
-            try {
-                String url = baseUrl + "?pageIndex=" + pageIndex + "&pageSize=" + pageSize;
 
-                HttpHeaders headers = new HttpHeaders();
-                headers.set("Authorization", "Bearer " + token);
-                headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
+            log.setPreviousFetchTime(log.getLastFetchTime());
+            log.setLastFetchTime(startTime);
 
-                HttpEntity<String> requestEntity = new HttpEntity<>(headers);
+            int addedThisYear = 0;
 
-                ResponseEntity<String> response = safeCiscoRequest(url, requestEntity);
+            System.out.println("Fetching Cisco advisories for year: " + year);
 
-                JsonNode root = mapper.readTree(response.getBody());
-                JsonNode advList = root.path("advisories");
+            String baseUrl = "https://apix.cisco.com/security/advisories/v2/year/" + year;
 
-                if (!advList.isArray() || advList.isEmpty()) break;
+            int pageIndex = 1;
+            int pageSize = 100;
 
-                advList.forEach(advisories::add);
+            while (pageIndex <= 100) {
 
-                if (advList.size() < pageSize) break;
+                try {
+                    String url = baseUrl + "?pageIndex=" + pageIndex + "&pageSize=" + pageSize;
 
-                pageIndex++;
+                    HttpHeaders headers = new HttpHeaders();
+                    headers.set("Authorization", "Bearer " + getAccessToken());
+                    headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
+                    HttpEntity<String> requestEntity = new HttpEntity<>(headers);
 
-                // ✅ Cisco rate–limit (30/min → wait 2.2 sec)
-                Thread.sleep(2200);
+                    ResponseEntity<String> response = safeCiscoRequest(url, requestEntity);
 
-            } catch (Exception e) {
-                System.err.println("❌ Error fetching Cisco page " + pageIndex + ": " + e.getMessage());
-                break;
-            }
-        }
+                    JsonNode root = mapper.readTree(response.getBody());
+                    JsonNode advList = root.path("advisories");
 
-        // ✅ SAVE TO DB
-        for (JsonNode adv : advisories) {
-            try {
-                String advisoryId = adv.path("advisoryId").asText(null);
-                if (advisoryId == null) continue;
+                    if (!advList.isArray() || advList.isEmpty())
+                        break;
 
-                List<String> cveIds = extractList(adv.path("cves"));
-                if (cveIds.isEmpty()) continue;
+                    for (JsonNode adv : advList) {
+                        try {
+                            String advisoryId = adv.path("advisoryId").asText();
+                            List<String> cveIds = extractList(adv.path("cves"));
 
-                Map<String, Object> ciscoData = buildCiscoData(adv);
-                List<String> bugIds = extractList(adv.path("bugIDs"));
-                List<String> cwes = extractList(adv.path("cwe"));
-                List<String> products = extractList(adv.path("productNames"));
+                            if (cveIds.isEmpty()) continue;
 
-                String csafUrl =
-                        "https://sec.cloudapps.cisco.com/security/center/contentjson/CiscoSecurityAdvisory/"
-                                + advisoryId + "/csaf/" + advisoryId + ".json";
+                            Map<String, Object> ciscoData = buildCiscoData(adv);
+                            List<String> bugIds = extractList(adv.path("bugIDs"));
+                            List<String> cwes = extractList(adv.path("cwe"));
+                            List<String> products = extractList(adv.path("productNames"));
 
-                JsonNode csafData = fetchCsafData(csafUrl);
-                if (csafData == null || csafData.isEmpty()) continue;
+                            String csafUrl =
+                                    "https://sec.cloudapps.cisco.com/security/center/contentjson/CiscoSecurityAdvisory/"
+                                            + advisoryId + "/csaf/" + advisoryId + ".json";
 
-                for (String cveId : cveIds) {
-                    CiscoAdvisory record = advisoryRepository.findById(cveId)
-                            .orElse(new CiscoAdvisory());
+                            JsonNode csafData = fetchCsafData(csafUrl);
+                            if (csafData == null || csafData.isEmpty()) continue;
 
-                    record.setCveId(cveId);
-                    record.setCisco_data(mapper.valueToTree(ciscoData));
-                    record.setBug_id(mapper.valueToTree(bugIds));
-                    record.setCwe(mapper.valueToTree(cwes));
-                    record.setProductnames(mapper.valueToTree(products));
-                    record.setCsaf(csafData);
-                    advisoryRepository.save(record);
-                    added++;
+                            for (String cveId : cveIds) {
+
+                                if (cveId == null || cveId.isEmpty()) continue;
+
+                                if (cveId == null || cveId.trim().isEmpty() || cveId.equalsIgnoreCase("NA")) {
+                                    System.out.println("SKIPPED - CVE NULL / NA");
+                                    continue;
+                                }
+                                yearTotalCount++;
+
+
+                                String newLastUpdate = adv.path("lastUpdated").asText("");
+                                Optional<CiscoAdvisory> existingOpt = advisoryRepository.findById(cveId);
+
+
+                                if (existingOpt.isEmpty()) {
+
+                                    CiscoAdvisory record = new CiscoAdvisory();
+                                    record.setCveId(cveId);
+                                    record.setCisco_data(mapper.valueToTree(ciscoData));
+                                    record.setBug_id(mapper.valueToTree(bugIds));
+                                    record.setCwe(mapper.valueToTree(cwes));
+                                    record.setProductnames(mapper.valueToTree(products));
+                                    record.setCsaf(csafData);
+
+                                    advisoryRepository.save(record);
+
+                                    addedThisYear++;
+                                    totalAdded++;
+
+                                    System.out.println(cveId + " ADDED");
+                                    continue;
+                                }
+
+
+
+                                CiscoAdvisory record = existingOpt.get();
+
+
+                                String oldLastUpdate = record.getCisco_data()
+                                        .path("last_update")
+                                        .asText("");
+
+
+
+                                if (Objects.equals(oldLastUpdate, newLastUpdate)) {
+                                    System.out.println(cveId + " SKIPPED (same last_update)");
+                                    continue;
+                                }
+
+
+
+                                try {
+                                    LocalDateTime oldDate = LocalDateTime.parse(oldLastUpdate.substring(0, 19));
+                                    LocalDateTime newDate = LocalDateTime.parse(newLastUpdate.substring(0, 19));
+
+                                    if (newDate.isBefore(oldDate)) {
+                                        System.out.println(cveId + " SKIPPED (incoming data is older)");
+                                        continue;
+                                    }
+
+                                } catch (Exception e) {
+                                    System.out.println("Date parse error → Updating to be safe: " + cveId);
+                                }
+
+
+
+                                record.setCisco_data(mapper.valueToTree(ciscoData));
+                                record.setBug_id(mapper.valueToTree(bugIds));
+                                record.setCwe(mapper.valueToTree(cwes));
+                                record.setProductnames(mapper.valueToTree(products));
+                                record.setCsaf(csafData);
+
+                                advisoryRepository.save(record);
+                                updatedThisYear++;
+
+                                System.out.println(cveId + " UPDATED (last_update newer)");
+                            }
+
+
+
+                        } catch (Exception e) {
+                            System.err.println("Error saving advisory: " + e.getMessage());
+                        }
+                    }
+
+                    if (advList.size() < pageSize) break;
+
+                    pageIndex++;
+
+                    Thread.sleep(2200);
                 }
-
-            } catch (Exception e) {
-                System.err.println("⚠️ Error saving advisory: " + e.getMessage());
+                catch (Exception e) {
+                    System.err.println("Error fetching Cisco year " + year + " page " + pageIndex);
+                    break;
+                }
             }
+            log.setUpdatedData(updatedThisYear);
+            log.setAddedData(addedThisYear);
+            log.setTotalData(yearTotalCount);
+            log.setVendorName(vendor);
+            log.setYear(year);
+            logRepository.save(log);
+
+
+            System.out.println("Year " + year + " completed. New CVEs added: " + addedThisYear + " Updated Data: " + updatedThisYear );
         }
+        VendorFetchLog summary = new VendorFetchLog();
+        summary.setVendorName(vendor);
+        summary.setYear(00000);
+        summary.setAddedData(totalAdded);
+        summary.setUpdatedData( totalAdded);
+        summary.setPreviousFetchTime(null);
+        summary.setLastFetchTime(startTime);
+        summary.setTotalData((int) advisoryRepository.count());
+        logRepository.save(summary);
 
-        log.setTotalData((int) advisoryRepository.count());
-        log.setAddedData(added);
-        logRepository.save(log);
+        System.out.println("SUMMARY → Added: " + totalAdded );
 
-        System.out.println("✅ Cisco advisories updated. Added: " + added);
+        System.out.println("ALL YEARS DONE. Total NEW added: " + totalAdded);
     }
 
-    // ======================================================
-    // ✅ SAFE CALL (429 retry)
-    // ======================================================
     private ResponseEntity<String> safeCiscoRequest(String url, HttpEntity<String> entity) {
-
-        int retries = 3;
-        long delay = 5000; // 5 sec
-
-        for (int i = 0; i < retries; i++) {
-            try {
-                return restTemplate.exchange(url, HttpMethod.GET, entity, String.class);
-            }
-            catch (Exception ex) {
-
-                if (ex.getMessage().contains("429")) {
-                    System.out.println("⚠️ Rate limit hit → waiting " + delay + "ms...");
-                    try { Thread.sleep(delay); } catch (InterruptedException ignored) {}
-                    delay *= 2;
-                } else {
-                    throw ex;
-                }
-            }
+        try {
+            return restTemplate.exchange(url, HttpMethod.GET, entity, String.class);
         }
-        throw new RuntimeException("Failed after retrying 429/other failures");
+        catch (HttpClientErrorException e) {
+
+            if (e.getStatusCode().value() == 401 || e.getStatusCode().value() == 403) {
+
+                System.out.println("Token expired → Getting new token...");
+
+                String newToken = getAccessToken();
+
+                HttpHeaders newHeaders = new HttpHeaders();
+                newHeaders.set("Authorization", "Bearer " + newToken);
+                newHeaders.set("Accept", MediaType.APPLICATION_JSON_VALUE);
+                HttpEntity<String> newEntity = new HttpEntity<>(newHeaders);
+
+                return restTemplate.exchange(url, HttpMethod.GET, newEntity, String.class);
+            }
+
+            throw e;
+        }
     }
 
-    // ======================================================
-    // ✅ HELPER
-    // ======================================================
     private Map<String, Object> buildCiscoData(JsonNode adv) {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("advisory_id", adv.path("advisoryId").asText(""));
@@ -272,14 +354,11 @@ public class ApiService {
             ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(headers), String.class);
             return mapper.readTree(response.getBody());
         } catch (Exception e) {
-            System.err.println("⚠️ CSAF fetch failed for " + url + ": " + e.getMessage());
+            System.err.println("CSAF fetch failed for " + url + ": " + e.getMessage());
             return mapper.createObjectNode();
         }
     }
 
-    // ======================================================
-    // ✅ NVD SAMPLE
-    // ======================================================
     public Map<String, Object> fetchNVDData() {
         String url = "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=Cisco&resultsPerPage=1000";
         try {
@@ -299,6 +378,7 @@ public class ApiService {
         }
     }
 
+    // software version find for the stored data
     public Map<String, Object> checkProductVersion(String vendor, String product, String version) {
         Map<String, Object> result = new HashMap<>();
 
@@ -328,11 +408,11 @@ public class ApiService {
             if (fixedSection == null) continue;
 
             String rawText = fixedSection.path("text").asText("");
-            System.out.println("📄 Raw Fixed Software text:");
+            System.out.println("Raw Fixed Software text:");
             System.out.println(rawText);
 
             Map<String, String> fixedVersions = extractFixedVersions(rawText);
-            System.out.println("📊 Parsed fixed versions: " + fixedVersions);
+            System.out.println("Parsed fixed versions: " + fixedVersions);
 
             if (fixedVersions.isEmpty()) continue;
 
@@ -413,7 +493,7 @@ public class ApiService {
                     String cleanFix = fix.split("\\s+")[0];
                     map.put(version, cleanFix);
                 }
-                System.out.println("📝 Parsed: " + version + " -> " + map.get(version));
+                System.out.println("Parsed: " + version + " -> " + map.get(version));
             }
 
             // Also try to match simple version-version pairs without "Migrate"
@@ -423,7 +503,7 @@ public class ApiService {
                 String version = simpleMatcher.group(1).trim();
                 String fix = simpleMatcher.group(2).trim();
                 map.put(version, fix);
-                System.out.println("📝 Simple parsed: " + version + " -> " + fix);
+                System.out.println("Simple parsed: " + version + " -> " + fix);
             }
         }
 
@@ -584,12 +664,12 @@ public class ApiService {
     }
 
     private String getFixForVersion(Map<String, String> table, String version) {
-        System.out.println("🔍 Checking version: " + version + " against table: " + table);
+        System.out.println("Checking version: " + version + " against table: " + table);
 
         // Direct match
         if (table.containsKey(version)) {
             String fix = table.get(version);
-            System.out.println("✅ Direct match found: " + fix);
+            System.out.println("Direct match found: " + fix);
             return fix;
         }
 
@@ -599,7 +679,7 @@ public class ApiService {
         // Sort all versions in ascending order
         allKeys.sort((a, b) -> compareVersion(normalize(a), normalize(b)));
 
-        System.out.println("📊 All sorted versions: " + allKeys);
+        System.out.println("All sorted versions: " + allKeys);
 
         // Find the position of our current version in the sorted list
         int currentIndex = -1;
@@ -620,7 +700,7 @@ public class ApiService {
             currentIndex = allKeys.size() - 1;
         }
 
-        System.out.println("📍 Current version position index: " + currentIndex);
+        System.out.println("Current version position index: " + currentIndex);
 
         // Look for the next available FIXED version (not MIGRATE)
         for (int i = currentIndex; i < allKeys.size(); i++) {
@@ -628,7 +708,7 @@ public class ApiService {
             String fix = table.get(key);
 
             if (!"MIGRATE".equals(fix)) {
-                System.out.println("✅ Found actual fix version: " + fix + " for key: " + key);
+                System.out.println("Found actual fix version: " + fix + " for key: " + key);
                 return fix;
             }
         }
@@ -637,15 +717,15 @@ public class ApiService {
         String currentKey = currentIndex >= 0 && currentIndex < allKeys.size() ? allKeys.get(currentIndex) : null;
         if (currentKey != null && table.containsKey(currentKey)) {
             String migrateFix = table.get(currentKey);
-            System.out.println("⚠️ No specific fix found, returning: " + migrateFix);
+            System.out.println("No specific fix found, returning: " + migrateFix);
             return migrateFix;
         }
 
         // Final fallback
-        System.out.println("❌ No fix version found");
+        System.out.println("No fix version found");
         return "MIGRATE";
     }
-    // ✅ UPDATED — Version normalization
+
     private List<Integer> normalize(String v) {
         List<Integer> list = new ArrayList<>();
         for (String part : v.split("[^0-9]+")) {
@@ -658,7 +738,7 @@ public class ApiService {
         return list;
     }
 
-    // Enhanced version comparison that handles more cases
+
     private int compareVersion(List<Integer> v1, List<Integer> v2) {
         int len = Math.max(v1.size(), v2.size());
 
@@ -676,7 +756,7 @@ public class ApiService {
 
 
     private String suggestBestFixVersion(Map<String, String> table, String currentVersion) {
-        System.out.println("💡 Looking for best available fix for: " + currentVersion);
+        System.out.println("Looking for best available fix for: " + currentVersion);
 
         List<String> availableFixes = new ArrayList<>();
         for (Map.Entry<String, String> entry : table.entrySet()) {
@@ -689,7 +769,7 @@ public class ApiService {
             // Sort available fixes and return the lowest one
             availableFixes.sort((a, b) -> compareVersion(normalize(a), normalize(b)));
             String bestFix = availableFixes.get(0);
-            System.out.println("💡 Suggested best available fix: " + bestFix);
+            System.out.println("Suggested best available fix: " + bestFix);
             return bestFix;
         }
 
