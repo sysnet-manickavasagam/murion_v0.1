@@ -13,7 +13,7 @@ public class VendorFetchLog {
 
     private String vendorName;
 
-    private Integer year;
+    private String year;
 
     private LocalDateTime lastFetchTime;
     private LocalDateTime previousFetchTime;
@@ -39,11 +39,11 @@ public class VendorFetchLog {
         this.vendorName = vendorName;
     }
 
-    public Integer getYear() {
+    public String getYear() {
         return year;
     }
 
-    public void setYear(Integer year) {
+    public void setYear(String year) {
         this.year = year;
     }
 

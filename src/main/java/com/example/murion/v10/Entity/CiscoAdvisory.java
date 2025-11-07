@@ -40,11 +40,11 @@ public class CiscoAdvisory {
     private JsonNode csaf;
 
 
-    @PrePersist
-    @PreUpdate
-    public void setProductNameFromJson() {
-        if (productnames != null && productnames.isArray() && productnames.size() > 0) {
-            this.productnames = productnames.get(0);
-        }
-    }
+//    @PrePersist
+//    @PreUpdate
+//    public void setProductNameFromJson() {
+//        if (productnames != null && productnames.isArray() && productnames.size() > 0) {
+//            this.productnames = productnames.get(0);
+//        }
+//    }
 }

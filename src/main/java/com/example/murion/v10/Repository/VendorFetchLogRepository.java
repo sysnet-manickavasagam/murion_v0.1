@@ -7,6 +7,6 @@ import java.util.Optional;
 
 public interface VendorFetchLogRepository extends JpaRepository<VendorFetchLog, Long> {
     Optional<VendorFetchLog> findByVendorName(String vendorName);
-    Optional<VendorFetchLog> findByVendorNameAndYear(String vendorName, Integer year);
+    Optional<VendorFetchLog> findByVendorNameAndYear(String vendorName, String year);
 
 }

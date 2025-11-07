@@ -6,10 +6,11 @@ import com.example.murion.v10.Repository.CiscoAdvisoryRepository;
 import com.example.murion.v10.Repository.VendorFetchLogRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
-import org.springframework.context.event.EventListener;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.http.*;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -18,6 +19,8 @@ import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
+
+import org.springframework.context.event.EventListener;
 
 import java.time.LocalDateTime;
 import java.util.*;
@@ -104,42 +107,44 @@ public class ApiService {
     }
 
 
-    @Scheduled(cron = "0 0 */3 * * *")
+    @Scheduled(cron = "0 0 */2 * * *")
     public void fetchAndStoreCiscoAdvisories() {
 
         String vendor = "Cisco";
-        LocalDateTime startTime = LocalDateTime.now();
+        LocalDateTime startTimeall = LocalDateTime.now();
 
         int totalAdded = 0;
-        int updatedThisYear = 0;
-        int yearTotalCount = 0;
+        int totalUpdated = 0;
 
 
-        for (int year = 2025; year >= 2001; year--) {
+
+        for (int year = 2025; year >= 1997; year--) {
 
             final int y = year;
 
-            VendorFetchLog log = logRepository.findByVendorNameAndYear(vendor, year)
+            VendorFetchLog log = logRepository.findByVendorNameAndYear(vendor, String.valueOf(year))
                     .orElseGet(() -> {
                         VendorFetchLog v = new VendorFetchLog();
                         v.setVendorName(vendor);
-                        v.setYear(y);
+                        v.setYear(String.valueOf(y));
                         return v;
                     });
 
 
-            log.setPreviousFetchTime(log.getLastFetchTime());
-            log.setLastFetchTime(startTime);
+
 
             int addedThisYear = 0;
-
+            int yearTotalCount = 0;
+            int updatedThisYear = 0;
             System.out.println("Fetching Cisco advisories for year: " + year);
 
             String baseUrl = "https://apix.cisco.com/security/advisories/v2/year/" + year;
 
             int pageIndex = 1;
             int pageSize = 100;
-
+            LocalDateTime startTime = LocalDateTime.now();
+            log.setPreviousFetchTime(log.getLastFetchTime());
+            log.setLastFetchTime(startTime);
             while (pageIndex <= 100) {
 
                 try {
@@ -207,7 +212,7 @@ public class ApiService {
                                     addedThisYear++;
                                     totalAdded++;
 
-                                    System.out.println(cveId + " ADDED");
+                                    System.out.println(cveId + " ADDED" );
                                     continue;
                                 }
 
@@ -252,7 +257,7 @@ public class ApiService {
 
                                 advisoryRepository.save(record);
                                 updatedThisYear++;
-
+                                totalUpdated++;
                                 System.out.println(cveId + " UPDATED (last_update newer)");
                             }
 
@@ -278,25 +283,35 @@ public class ApiService {
             log.setAddedData(addedThisYear);
             log.setTotalData(yearTotalCount);
             log.setVendorName(vendor);
-            log.setYear(year);
+            log.setYear(String.valueOf(year));
             logRepository.save(log);
 
 
             System.out.println("Year " + year + " completed. New CVEs added: " + addedThisYear + " Updated Data: " + updatedThisYear );
         }
-        VendorFetchLog summary = new VendorFetchLog();
-        summary.setVendorName(vendor);
-        summary.setYear(00000);
+        // Check if summary record exists
+        VendorFetchLog summary = logRepository
+                .findByVendorNameAndYear(vendor, "1997 to 2025")
+                .orElse(null);
+
+        if (summary == null) {
+            // Create new summary only once
+            summary = new VendorFetchLog();
+            summary.setVendorName(vendor);
+            summary.setYear("1997 to 2025");
+        }
+
+// Update fields
+        summary.setPreviousFetchTime(summary.getLastFetchTime());
         summary.setAddedData(totalAdded);
-        summary.setUpdatedData( totalAdded);
-        summary.setPreviousFetchTime(null);
-        summary.setLastFetchTime(startTime);
+        summary.setUpdatedData(totalUpdated);
+        summary.setLastFetchTime(startTimeall);
         summary.setTotalData((int) advisoryRepository.count());
+
         logRepository.save(summary);
 
-        System.out.println("SUMMARY → Added: " + totalAdded );
-
         System.out.println("ALL YEARS DONE. Total NEW added: " + totalAdded);
+
     }
 
     private ResponseEntity<String> safeCiscoRequest(String url, HttpEntity<String> entity) {
@@ -774,6 +789,10 @@ public class ApiService {
         }
 
         return "MIGRATE";
+    }
+    public Page<CiscoAdvisory> fetchByProduct(String product, int page, int size) {
+        Pageable pageable = PageRequest.of(page, size);
+        return advisoryRepository.findByProductContains(product, pageable);
     }
 
 }
