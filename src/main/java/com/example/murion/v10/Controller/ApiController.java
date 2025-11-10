@@ -4,6 +4,7 @@ import com.example.murion.v10.Entity.CiscoAdvisory;
 import com.example.murion.v10.Service.ApiService;
 import com.example.murion.v10.Entity.VendorFetchLog;
 import com.example.murion.v10.Repository.VendorFetchLogRepository;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -14,7 +15,7 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-@CrossOrigin(origins = "http://localhost:5174")
+@CrossOrigin(origins = "http://localhost:5173")
 @RestController
 @RequestMapping("/api")
 public class ApiController {
@@ -63,13 +64,12 @@ public class ApiController {
     }
 
     @GetMapping("/cisco/search")
-    public Page<CiscoAdvisory> searchCiscoData(
-            @RequestParam String product,
-            @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "50") int size
-    ) {
-        return apiService.fetchByProduct(product, page, size);
+    public JsonNode searchCiscoData(@RequestParam String product , String version) throws Exception {
+        return apiService.fetchLatestByProduct(product , version);
     }
+
+
+
 
 
 }

@@ -20,10 +20,17 @@ public interface CiscoAdvisoryRepository extends JpaRepository<CiscoAdvisory, St
 
 
     @Query(
-            value = "SELECT * FROM cisco_advisory ca " +
-                    "WHERE LOWER(ca.productnames::text) LIKE LOWER(CONCAT('%', :product, '%'))",
+            value = """
+        SELECT *
+        FROM cisco_advisory ca
+        WHERE ca.productnames @> CAST(CONCAT('["', :product, '"]') AS jsonb)
+        ORDER BY (ca.cisco_data->>'first_published')::timestamp DESC
+        LIMIT 1
+    """,
             nativeQuery = true
     )
-    Page<CiscoAdvisory> findByProductContains(@Param("product") String product, Pageable pageable);
+    CiscoAdvisory findLatestByProduct(@Param("product") String product);
+
+
 }
 

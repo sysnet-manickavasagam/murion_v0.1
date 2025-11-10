@@ -6,6 +6,7 @@ import com.example.murion.v10.Repository.CiscoAdvisoryRepository;
 import com.example.murion.v10.Repository.VendorFetchLogRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.data.domain.Page;
@@ -22,6 +23,7 @@ import org.springframework.web.client.RestTemplate;
 
 import org.springframework.context.event.EventListener;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.regex.Matcher;
@@ -52,11 +54,11 @@ public class ApiService {
         this.restTemplate = restTemplate;
     }
 
-    @EventListener(ApplicationReadyEvent.class)
-    public void onAppStart() {
-        System.out.println("Application Ready → Fetching Cisco Data...");
-        fetchAndStoreCiscoAdvisories();
-    }
+//    @EventListener(ApplicationReadyEvent.class)
+//    public void onAppStart() {
+//        System.out.println("Application Ready → Fetching Cisco Data...");
+//        fetchAndStoreCiscoAdvisories();
+//    }
 
     private RestTemplate createRestTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -107,7 +109,7 @@ public class ApiService {
     }
 
 
-    @Scheduled(cron = "0 0 */2 * * *")
+    @Scheduled(cron = "0 0 */4 * * *")
     public void fetchAndStoreCiscoAdvisories() {
 
         String vendor = "Cisco";
@@ -333,8 +335,10 @@ public class ApiService {
 
                 return restTemplate.exchange(url, HttpMethod.GET, newEntity, String.class);
             }
-
-            throw e;
+            return new ResponseEntity<>(
+                    e.getResponseBodyAsString(),
+                    e.getStatusCode()
+            );
         }
     }
 
@@ -790,10 +794,142 @@ public class ApiService {
 
         return "MIGRATE";
     }
-    public Page<CiscoAdvisory> fetchByProduct(String product, int page, int size) {
-        Pageable pageable = PageRequest.of(page, size);
-        return advisoryRepository.findByProductContains(product, pageable);
+
+
+    public JsonNode fetchLatestByProduct(String product , String versionnum) throws Exception {
+
+        CiscoAdvisory findData = advisoryRepository.findLatestByProduct(product);
+
+        String osType = extractOsType(product);
+        String version = versionnum;
+
+        String url = "https://apix.cisco.com/security/advisories/v2/OSType/"
+                + osType
+                + "?version=" + version;
+
+        if (findData != null) {
+            JsonNode ciscoDataJson = mapper.readTree(findData.getCisco_data().toString());
+            String advisoryId = ciscoDataJson.path("advisory_id").asText();
+            if (!advisoryId.isEmpty()) {
+                url = url + "&advisoryId=" + advisoryId;
+            }
+        }
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("Authorization", "Bearer " + getAccessToken());
+        headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
+
+        ResponseEntity<String> response = safeCiscoRequest(url, new HttpEntity<>(headers));
+
+        JsonNode result = mapper.readTree(response.getBody());
+
+        // Treat invalid version or no data as NOT_AFFECTED
+        if (result.has("errorCode")) {
+            String errorCode = result.path("errorCode").asText().toUpperCase();
+
+            // Handle invalid versions
+            if (errorCode.contains("INVALID")) {
+                ObjectNode resp = mapper.createObjectNode();
+                resp.put("product", product);
+                resp.put("version", version);
+                resp.put("status", "Invalid"); // or "AFFECTED" if desired
+                resp.put("message", "Invalid version");
+                return resp;
+            }
+
+            // Handle valid but not affected versions
+            if ("NO_DATA_FOUND".equals(errorCode)) {
+                ObjectNode resp = mapper.createObjectNode();
+                resp.put("product", product);
+                resp.put("version", version);
+                resp.put("status", "NOT_AFFECTED");
+                resp.put("message", "Version exists but not affected");
+                return resp;
+            }
+        }
+
+// If neither INVALID nor NO_DATA_FOUND, extract advisories normally
+        JsonNode advisories = result.path("advisories");
+
+        JsonNode advisoryNode = advisories.get(0);
+
+        JsonNode firstFixed = advisoryNode.path("firstFixed");
+        String fixedVersion = (firstFixed.isArray() && firstFixed.size() > 0)
+                ? firstFixed.get(0).asText()
+                : "Contact your support organization for upgrade instructions.";
+
+        ObjectNode resp = mapper.createObjectNode();
+        resp.put("product", product);
+        resp.put("currentAffectedVersion", version);
+        resp.put("fixedVersion", fixedVersion);
+        resp.put("cveId", advisoryNode.path("cves").get(0).asText(""));
+        resp.put("advisoryId", advisoryNode.path("advisoryId").asText(""));
+        resp.put("advisoryTitle", advisoryNode.path("advisoryTitle").asText(""));
+        resp.put("cvssBaseScore", advisoryNode.path("cvssBaseScore").asText(""));
+        resp.put("status", advisoryNode.path("status").asText(""));
+        resp.put("sir", advisoryNode.path("sir").asText(""));
+        resp.put("lastUpdated", advisoryNode.path("lastUpdated").asText(""));
+        resp.put("firstPublished", advisoryNode.path("firstPublished").asText(""));
+        resp.put("summary", advisoryNode.path("summary").asText(""));
+
+        return resp;
     }
+
+
+
+
+
+        private boolean isEligible(String osType, String lastUpdatedDate) {
+
+        LocalDate minDate;
+
+        switch (osType) {
+            case "asa":
+            case "fmc":
+            case "ftd":
+            case "fxos":
+                minDate = LocalDate.of(2022, 1, 1);
+                break;
+
+            case "nxos":
+                minDate = LocalDate.of(2019, 7, 1);
+                break;
+
+            default:
+                // ios / iosxe always allowed
+                return true;
+        }
+
+        LocalDate advisoryDate = LocalDate.parse(lastUpdatedDate.substring(0, 10));
+
+        return advisoryDate.isEqual(minDate) || advisoryDate.isAfter(minDate);
+    }
+
+    private String extractOsType(String product) {
+        product = product.toLowerCase();
+
+        if (product.contains("ios xe")) return "iosxe";
+        if (product.contains("ios")) return "ios";
+        if (product.contains("nx-os") || product.contains("nxos")) return "nxos";
+        if (product.contains("asa")) return "asa";
+        if (product.contains("ftd")) return "ftd";
+        if (product.contains("fxos")) return "fxos";
+        if (product.contains("fmc")) return "fmc";
+
+        return "ios"; // default fallback
+    }
+
+    private String extractVersion(String product) {
+        Pattern p = Pattern.compile("(\\d+(\\.\\d+)*([A-Za-z0-9().-]+)?)");
+        Matcher m = p.matcher(product);
+
+        String lastMatch = "";
+        while (m.find()) {
+            lastMatch = m.group();
+        }
+        return lastMatch;
+    }
+
 
 }
 
