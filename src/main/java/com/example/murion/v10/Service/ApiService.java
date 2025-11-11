@@ -948,6 +948,7 @@ public class ApiService {
         if (product.contains("ftd")) return "ftd";
         if (product.contains("fxos")) return "fxos";
         if (product.contains("fmc")) return "fmc";
+        if (product.contains("aci")) return "aci";
 
         return "ios"; // default fallback
     }
