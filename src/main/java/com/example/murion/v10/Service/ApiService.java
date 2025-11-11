@@ -866,6 +866,16 @@ public class ApiService {
         JsonNode advisories = result.path("advisories");
 
         JsonNode advisoryNode = advisories.get(0);
+
+        String lastUpdatedDate = advisoryNode.path("lastUpdated").asText("");
+        if (!isEligible(osType, lastUpdatedDate)) {
+            ObjectNode resp = mapper.createObjectNode();
+            resp.put("product", product);
+            resp.put("version", version);
+            resp.put("status", "Old data not allowed");
+            resp.put("message", "Advisory is older than allowed minimum date");
+            return resp;
+        }
         String fixedVersion = "Contact your support organization for upgrade instructions.";
 
 
@@ -925,6 +935,7 @@ public class ApiService {
                 break;
 
             case "nxos":
+            case "aci":
                 minDate = LocalDate.of(2019, 7, 1);
                 break;
 
@@ -950,7 +961,7 @@ public class ApiService {
         if (product.contains("fmc")) return "fmc";
         if (product.contains("aci")) return "aci";
 
-        return "ios"; // default fallback
+        return product; // default fallback
     }
 
     private String extractVersion(String product) {
