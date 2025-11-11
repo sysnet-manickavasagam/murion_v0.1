@@ -797,11 +797,12 @@ public class ApiService {
 
 
     public JsonNode fetchLatestByProduct(String product , String versionnum) throws Exception {
-
-        CiscoAdvisory findData = advisoryRepository.findLatestByProduct(product);
-
         String osType = extractOsType(product);
         String version = versionnum;
+        CiscoAdvisory findData = advisoryRepository.findLatestByProduct(osType, versionnum);
+
+
+
 
         String url = "https://apix.cisco.com/security/advisories/v2/OSType/"
                 + osType
@@ -809,16 +810,29 @@ public class ApiService {
 
         if (findData != null) {
             JsonNode ciscoDataJson = mapper.readTree(findData.getCisco_data().toString());
-            String advisoryId = ciscoDataJson.path("advisory_id").asText();
+
+            // Try both advisoryId & advisory_id
+            String advisoryId = ciscoDataJson.path("advisoryId").asText();
+            if (advisoryId.isEmpty()) {
+                advisoryId = ciscoDataJson.path("advisory_id").asText();
+            }
+
             if (!advisoryId.isEmpty()) {
                 url = url + "&advisoryId=" + advisoryId;
+                System.out.println("advisoryId added = " + advisoryId);
+            } else {
+                System.out.println("advisoryId NOT FOUND in DB JSON");
             }
         }
 
+        if (findData == null) {
+            System.out.println("Product NOT FOUND in DB JSON");
+
+        }
         HttpHeaders headers = new HttpHeaders();
         headers.set("Authorization", "Bearer " + getAccessToken());
         headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
-
+        System.out.println("full url" + url);
         ResponseEntity<String> response = safeCiscoRequest(url, new HttpEntity<>(headers));
 
         JsonNode result = mapper.readTree(response.getBody());
@@ -833,7 +847,7 @@ public class ApiService {
                 resp.put("product", product);
                 resp.put("version", version);
                 resp.put("status", "Invalid"); // or "AFFECTED" if desired
-                resp.put("message", "Invalid version");
+                resp.put("message", "Product not found in database table");
                 return resp;
             }
 
@@ -852,11 +866,30 @@ public class ApiService {
         JsonNode advisories = result.path("advisories");
 
         JsonNode advisoryNode = advisories.get(0);
+        String fixedVersion = "Contact your support organization for upgrade instructions.";
+
 
         JsonNode firstFixed = advisoryNode.path("firstFixed");
-        String fixedVersion = (firstFixed.isArray() && firstFixed.size() > 0)
-                ? firstFixed.get(0).asText()
-                : "Contact your support organization for upgrade instructions.";
+        if (firstFixed.isArray() && firstFixed.size() > 0) {
+            fixedVersion = firstFixed.get(0).asText();
+        }
+
+        if (fixedVersion.startsWith("Contact")) {
+            JsonNode platforms = advisoryNode.path("platforms");
+            if (platforms.isArray()) {
+                for (JsonNode platform : platforms) {
+                    JsonNode firstFixes = platform.path("firstFixes");
+
+                    if (firstFixes.isArray() && firstFixes.size() > 0) {
+                        JsonNode fixNode = firstFixes.get(0);
+                        if (fixNode.has("name")) {
+                            fixedVersion = fixNode.get("name").asText();
+                            break; // take first found
+                        }
+                    }
+                }
+            }
+        }
 
         ObjectNode resp = mapper.createObjectNode();
         resp.put("product", product);
