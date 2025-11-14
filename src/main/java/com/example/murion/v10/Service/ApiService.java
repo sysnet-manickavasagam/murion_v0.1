@@ -54,11 +54,11 @@ public class ApiService {
         this.restTemplate = restTemplate;
     }
 
-//    @EventListener(ApplicationReadyEvent.class)
-//    public void onAppStart() {
-//        System.out.println("Application Ready → Fetching Cisco Data...");
-//        fetchAndStoreCiscoAdvisories();
-//    }
+    @EventListener(ApplicationReadyEvent.class)
+    public void onAppStart() {
+        System.out.println("Application Ready → Fetching Cisco Data...");
+        fetchAndStoreCiscoAdvisories();
+    }
 
     private RestTemplate createRestTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -977,4 +977,9 @@ public class ApiService {
 
 
 }
+
+
+
+
+
 
